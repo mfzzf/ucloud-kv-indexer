@@ -1,0 +1,86 @@
+# Localhost dev topology for `make up` — TWO co-resident clusters on one box.
+#
+# This single file describes the whole local deployment. Each CLUSTER is a
+# (GPU pool + serving framework + model) unit; its engines and models are nested
+# under it and inherit the cluster's `framework`. The loader flattens this into
+# normalized clusters/engines/profiles tables (SQLite). Every endpoint is
+# 127.0.0.1 ONLY — this box has a public IP and nothing here may be exposed.
+#
+# Two real engines run side by side on one 24GB GPU (see deploy/serve-*.sh):
+#
+#   local-vllm    vLLM   qwen3.5-4b  :8000   ZMQ 5559/5560   block_size 528
+#   local-sglang  SGLang qwen3-0.6b  :30000  ZMQ 5557/5558   block_size 64
+#
+# `make up` runs ONE kvindexer per cluster (each next to its engine so the ZMQ
+# KV-event stream stays node-local) and one gateway that federates both:
+#
+#   kvindexer  :8090  -cluster local-vllm
+#   kvindexer  :8091  -cluster local-sglang
+#   kvgateway  :8095  -config deploy/config.local.yaml   (federates 8090 + 8091)
+#
+# After first boot each kvindexer's SQLite store is the source of truth; the
+# console mutates it. Re-seed by deleting run/*.db.
+
+clusters:
+  # ---- Cluster 1: vLLM serving the 4B hybrid model -------------------------
+  - cluster_id: local-vllm
+    display_name: Local · vLLM · Qwen3.5-4B
+    region: localhost
+    environment: dev
+    enabled: true
+    framework: vllm
+    backends: [http://127.0.0.1:8090]      # kvindexer URL the gateway federates
+    models:
+      # qwen3.5-4b is hybrid (Mamba + full-attention); the full_attention group
+      # block size is 528. hash_profile defaults to vllm-v1-text.
+      - model_id: qwen3.5-4b
+        block_size: 528
+        hash_seed: "0"
+        tokenizer_endpoint: http://127.0.0.1:8000
+    engines:
+      - engine_id: vllm-local-0
+        api_endpoint: http://127.0.0.1:8000
+        tokenizer_endpoint: http://127.0.0.1:8000
+        kv_event_endpoint: tcp://127.0.0.1:5559
+        replay_endpoint: tcp://127.0.0.1:5560
+        topic: kv-events
+        served_models: [qwen3.5-4b]
+        dp_ranks: 1
+        max_model_len: 8192
+
+  # ---- Cluster 2: SGLang serving the small dense model ---------------------
+  - cluster_id: local-sglang
+    display_name: Local · SGLang · Qwen3-0.6B
+    region: localhost
+    environment: dev
+    enabled: true
+    framework: sglang
+    backends: [http://127.0.0.1:8091]
+    models:
+      # qwen3-0.6b is standard dense attention; --page-size 64 => block_size 64.
+      # hash_profile defaults to sglang-v1-text.
+      - model_id: qwen3-0.6b
+        block_size: 64
+        hash_seed: "0"
+        tokenizer_endpoint: http://127.0.0.1:30000
+    engines:
+      - engine_id: sglang-local-0
+        api_endpoint: http://127.0.0.1:30000
+        tokenizer_endpoint: http://127.0.0.1:30000
+        kv_event_endpoint: tcp://127.0.0.1:5557
+        replay_endpoint: tcp://127.0.0.1:5558
+        topic: kv-events
+        served_models: [qwen3-0.6b]
+        dp_ranks: 1
+        max_model_len: 8192
+
+# Policies are cross-cluster (scoped by cluster/model/tenant), so they live at
+# the top level. A low long-prompt threshold makes the admission behavior easy
+# to exercise on these short-context dev models.
+policies:
+  - policy_id: local-default
+    long_prompt_threshold_tokens: 256
+    hard_long_prompt_threshold_tokens: 7168
+    min_hit_ratio_for_long_prompt: 0.5
+    event_freshness_ttl_ms: 5000
+    enabled: true

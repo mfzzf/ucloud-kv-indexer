@@ -1,0 +1,14 @@
+# Go
+/kvindexer
+*.test
+
+# data snapshots
+/data/*.json
+
+# Node / Next
+web/node_modules/
+web/.next/
+web/.env.local
+
+# Makefile runtime (binaries, logs, pids, mutable config snapshots)
+/run/
