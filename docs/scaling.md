@@ -42,10 +42,9 @@ The component that subscribes to ZMQ is the **kvindexer**:
 engines, so the ZMQ KV-event stream stays **node-local / cluster-local** (high
 bandwidth, low latency, never crosses the gateway). The gateway sits in front of one
 or more kvindexer backends per cluster and is selected by the console with
-`?cluster=` (`gateway.go:65-82`, `deploy/config.yaml:10-20`). The shared
-`deploy/config.yaml` is read by *both* programs: kvgateway uses each cluster's
-`backends:` list (`bootstrap.go:60-62`), while kvindexer uses `-bootstrap … -cluster`
-to seed only its own cluster's engines (`config.yaml:16-20`).
+`?cluster=`. The gateway reads one or more bootstrap YAML files via `-config` /
+`-configs` for each cluster's `backends:` list, while each kvindexer reads its own
+cluster bootstrap with `-bootstrap … -cluster` to seed only its engines.
 
 ```
             ┌─────────────┐         HTTP (fan-out reads / proxied writes)
@@ -234,7 +233,7 @@ process.** This split-one-model-across-shards case is a known limitation, listed
 
 ### Config sketch (gateway federating two shards of one cluster)
 
-In the shared `deploy/config.yaml`, give the hot cluster two backends and run two
+In that cluster's bootstrap YAML, give the hot cluster two backends and run two
 kvindexers, each seeded with a disjoint engine subset. The gateway picks up both URLs:
 
 ```yaml
@@ -264,15 +263,15 @@ engine subset into it:
 
 ```sh
 # Shard A — owns engines 0..3 of cluster h20-1
-kvindexer -addr :8090 -bootstrap deploy/config.yaml -cluster h20-1 \
+kvindexer -addr :8090 -bootstrap deploy/h20-1-a.yaml -cluster h20-1 \
           -store sqlite -sqlite-path data/h20-1-a.db
 
 # Shard B — owns engines 4..7 of cluster h20-1
-kvindexer -addr :8091 -bootstrap deploy/config.yaml -cluster h20-1 \
+kvindexer -addr :8091 -bootstrap deploy/h20-1-b.yaml -cluster h20-1 \
           -store sqlite -sqlite-path data/h20-1-b.db
 
 # Gateway federates both via clusters[].backends
-kvgateway -addr :8095 -config deploy/config.yaml
+kvgateway -addr :8095 -configs deploy/h20-1-a.yaml,deploy/h20-1-b.yaml
 ```
 
 > Note: `-cluster` today seeds *all* of that cluster's engines into each process
@@ -462,8 +461,7 @@ its resolution for the record); the rest are **documented, not fixed**.
   a burst buffers there instead of OOMing; sustained overrun blocks recv → ZMQ drops past
   its HWM → **sequence gaps** that are **detected but not yet replayed** (gap #1).
 - To handle a hot cluster, **shard engines/models across multiple kvindexers** and add
-  their URLs to `clusters[].backends`; the gateway federates them transparently
-  (`gateway.go:163-198`, `deploy/config.yaml:28`).
+  their URLs to `clusters[].backends`; the gateway federates them transparently.
 - Rules of thumb: **~1e5 batches/sec/core**, **~0.25–0.3 GB per million resident
   blocks** (× holders), add a shard when `GapsTotal` climbs or RSS nears the box.
 - Biggest production gaps: **no replay on gap**, **no backpressure bound**,

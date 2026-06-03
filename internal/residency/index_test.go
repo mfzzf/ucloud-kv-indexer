@@ -208,3 +208,35 @@ func TestTierBreakdown(t *testing.T) {
 		t.Fatalf("disk cumulative should be 8, got %d", ih.Disk)
 	}
 }
+
+func TestStoreEventByEngineKeysAddsLowerTier(t *testing.T) {
+	ix := NewIndex(nil)
+	seed := SeedNamespace("ns")
+	bs := 4
+	keys := RequestKeysFromTokens(seed, toks(0, 8), bs)
+	engKeys := []EngineKey{1, 2}
+
+	ix.StoreEvent("w0", 0, "gpu", engKeys, keys)
+	resolved, ok := ix.StoreEventByEngineKeys("w0", 0, "cpu", engKeys)
+	if !ok {
+		t.Fatalf("lower-tier store should resolve existing engine keys")
+	}
+	if len(resolved) != len(keys) || resolved[0] != keys[0] || resolved[1] != keys[1] {
+		t.Fatalf("resolved request keys mismatch: got %v want %v", resolved, keys)
+	}
+
+	// Removing the GPU tier must not destroy the bridge needed to remove CPU.
+	ix.RemoveEvent("w0", 0, "gpu", []EngineKey{1})
+	res := ix.Query(keys, bs)
+	ih := res.Instances["w0"]
+	if ih == nil || ih.LongestMatched != 8 || ih.CPU != 8 {
+		t.Fatalf("CPU lower tier should still cover the prefix, got %+v", ih)
+	}
+
+	ix.RemoveEvent("w0", 0, "cpu", []EngineKey{1})
+	res = ix.Query(keys, bs)
+	ih = res.Instances["w0"]
+	if ih != nil && ih.LongestMatched != 0 {
+		t.Fatalf("removing CPU block 0 should break contiguous prefix to 0, got %+v", ih)
+	}
+}

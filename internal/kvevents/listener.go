@@ -3,7 +3,9 @@ package kvevents
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,16 +27,17 @@ type IndexResolver interface {
 
 // StreamHealth is observable per-engine listener state.
 type StreamHealth struct {
-	EngineID      string `json:"engine_id"`
-	Endpoint      string `json:"endpoint"`
-	Topic         string `json:"topic"`
-	Connected     bool   `json:"connected"`
-	LastSeq       int64  `json:"last_seq"`
-	LastEventUnix int64  `json:"last_event_unix"`
-	EventsTotal   int64  `json:"events_total"`
-	GapsTotal     int64  `json:"gaps_total"`
-	SkippedTotal  int64  `json:"skipped_total"`
-	DecodeErrors  int64  `json:"decode_errors"`
+	EngineID       string `json:"engine_id"`
+	Endpoint       string `json:"endpoint"`
+	ReplayEndpoint string `json:"replay_endpoint,omitempty"`
+	Topic          string `json:"topic"`
+	Connected      bool   `json:"connected"`
+	LastSeq        int64  `json:"last_seq"`
+	LastEventUnix  int64  `json:"last_event_unix"`
+	EventsTotal    int64  `json:"events_total"`
+	GapsTotal      int64  `json:"gaps_total"`
+	SkippedTotal   int64  `json:"skipped_total"`
+	DecodeErrors   int64  `json:"decode_errors"`
 	// QueueDepth/QueueCap expose the recv→apply backpressure buffer. A depth
 	// persistently near cap means the index-apply step (decode + lock + store)
 	// is not keeping up with this engine's event rate — the signal to shard the
@@ -42,6 +45,44 @@ type StreamHealth struct {
 	QueueDepth int    `json:"queue_depth"`
 	QueueCap   int    `json:"queue_cap"`
 	LastError  string `json:"last_error,omitempty"`
+}
+
+// EventSink receives decoded KV-cache events after the listener has interpreted
+// whether they were indexed or skipped. Implementations must be non-blocking or
+// internally buffered: this sits on the ZMQ ingest path.
+type EventSink interface {
+	RecordKVEvent(KVEventRecord)
+}
+
+// KVEventRecord is the Mongo-friendly persistence shape for received ZMQ KV
+// events. uint64 hashes are stringified so BSON never has to coerce them into
+// signed int64 values.
+type KVEventRecord struct {
+	ObservedAt     time.Time `json:"observed_at" bson:"observed_at"`
+	EngineID       string    `json:"engine_id" bson:"engine_id"`
+	Model          string    `json:"model" bson:"model"`
+	Namespace      string    `json:"namespace,omitempty" bson:"namespace,omitempty"`
+	Seq            string    `json:"seq" bson:"seq"`
+	BatchTS        float64   `json:"batch_ts,omitempty" bson:"batch_ts,omitempty"`
+	DPRank         int       `json:"dp_rank" bson:"dp_rank"`
+	Kind           string    `json:"kind" bson:"kind"`
+	BlockHashes    []string  `json:"block_hashes,omitempty" bson:"block_hashes,omitempty"`
+	ParentHash     string    `json:"parent_hash,omitempty" bson:"parent_hash,omitempty"`
+	TokenIDs       []int32   `json:"token_ids,omitempty" bson:"token_ids,omitempty"`
+	NestedTokenIDs bool      `json:"nested_token_ids,omitempty" bson:"nested_token_ids,omitempty"`
+	BlockSize      int       `json:"block_size,omitempty" bson:"block_size,omitempty"`
+	Medium         string    `json:"medium,omitempty" bson:"medium,omitempty"`
+	Tier           string    `json:"tier,omitempty" bson:"tier,omitempty"`
+	LoraID         *int      `json:"lora_id,omitempty" bson:"lora_id,omitempty"`
+	LoraName       string    `json:"lora_name,omitempty" bson:"lora_name,omitempty"`
+	ExtraKeys      []string  `json:"extra_keys,omitempty" bson:"extra_keys,omitempty"`
+	ExtraKeyCount  int       `json:"extra_key_count,omitempty" bson:"extra_key_count,omitempty"`
+	GroupIdx       int       `json:"group_idx,omitempty" bson:"group_idx,omitempty"`
+	SpecKind       string    `json:"spec_kind,omitempty" bson:"spec_kind,omitempty"`
+	SlidingWindow  int       `json:"sliding_window,omitempty" bson:"sliding_window,omitempty"`
+	RequestKeys    []string  `json:"request_keys,omitempty" bson:"request_keys,omitempty"`
+	Indexed        bool      `json:"indexed" bson:"indexed"`
+	SkipReason     string    `json:"skip_reason,omitempty" bson:"skip_reason,omitempty"`
 }
 
 // applyQueueSize bounds the recv→apply hand-off buffer (per engine). The pure-Go
@@ -56,13 +97,15 @@ const applyQueueSize = 8192
 
 // Listener subscribes to one engine's ZMQ KV event stream.
 type Listener struct {
-	engineID string
-	model    string // primary served model used for namespace resolution
-	endpoint string
-	topic    string
+	engineID       string
+	model          string // primary served model used for namespace resolution
+	endpoint       string
+	replayEndpoint string
+	topic          string
 
 	resolver IndexResolver
 	now      func() time.Time
+	sink     EventSink
 
 	// health (atomic-ish; guarded by mu for strings)
 	mu        sync.RWMutex
@@ -83,14 +126,24 @@ type Listener struct {
 
 // NewListener builds a listener. model is the served model used to resolve the
 // target index namespace for ingested events.
-func NewListener(engineID, model, endpoint, topic string, resolver IndexResolver, nowFn func() time.Time) *Listener {
+func NewListener(engineID, model, endpoint, topic string, resolver IndexResolver, nowFn func() time.Time, sinks ...EventSink) *Listener {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	var sink EventSink
+	if len(sinks) > 0 {
+		sink = sinks[0]
+	}
 	return &Listener{
 		engineID: engineID, model: model, endpoint: endpoint, topic: topic,
-		resolver: resolver, now: nowFn, done: make(chan struct{}),
+		resolver: resolver, now: nowFn, sink: sink, done: make(chan struct{}),
 	}
+}
+
+// SetReplayEndpoint configures the optional vLLM/SGLang replay ROUTER endpoint.
+// Replay is best-effort; live SUB remains the source of truth if replay fails.
+func (l *Listener) SetReplayEndpoint(endpoint string) {
+	l.replayEndpoint = endpoint
 }
 
 // Start launches the subscribe loop in a goroutine.
@@ -162,6 +215,8 @@ func (l *Listener) subscribeLoop(ctx context.Context) error {
 	l.connected = true
 	l.lastErr = ""
 	l.mu.Unlock()
+
+	l.replayBuffered(ctx)
 
 	// Decouple recv from apply: the recv loop below stays hot draining the
 	// socket while a dedicated apply goroutine does the expensive work
@@ -250,8 +305,84 @@ func (l *Listener) handleFrames(frames [][]byte) {
 	l.ingest(batch)
 }
 
+func (l *Listener) replayBuffered(ctx context.Context) {
+	if l.replayEndpoint == "" {
+		return
+	}
+	start := l.nextReplaySeq()
+	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	req := zmq4.NewReq(rctx)
+	defer req.Close()
+	if err := req.Dial(l.replayEndpoint); err != nil {
+		l.setErr(fmt.Errorf("replay dial: %w", err))
+		return
+	}
+	startFrame := make([]byte, 8)
+	binary.BigEndian.PutUint64(startFrame, uint64(start))
+	if err := req.Send(zmq4.NewMsg(startFrame)); err != nil {
+		l.setErr(fmt.Errorf("replay request: %w", err))
+		return
+	}
+	for {
+		msg, err := req.Recv()
+		if err != nil {
+			l.setErr(fmt.Errorf("replay recv: %w", err))
+			return
+		}
+		if len(msg.Frames) == 0 {
+			l.decErrs.Add(1)
+			continue
+		}
+		seqFrame := msg.Frames[0]
+		if isReplayEnd(seqFrame) {
+			return
+		}
+		if len(seqFrame) != 8 || len(msg.Frames) < 2 {
+			l.decErrs.Add(1)
+			continue
+		}
+		seq := binary.BigEndian.Uint64(seqFrame)
+		var payload []any
+		if err := msgpack.Unmarshal(msg.Frames[1], &payload); err != nil {
+			l.decErrs.Add(1)
+			l.setErr(err)
+			continue
+		}
+		batch, err := DecodeBatch(seq, payload)
+		if err != nil {
+			l.decErrs.Add(1)
+			l.setErr(err)
+			continue
+		}
+		l.trackSeq(int64(seq))
+		l.ingest(batch)
+	}
+}
+
+func (l *Listener) nextReplaySeq() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if !l.hasSeq {
+		return 0
+	}
+	return l.lastSeq + 1
+}
+
+func isReplayEnd(frame []byte) bool {
+	if len(frame) != 8 {
+		return false
+	}
+	return int64(binary.BigEndian.Uint64(frame)) == -1
+}
+
 func (l *Listener) trackSeq(seq int64) {
 	l.mu.Lock()
+	if l.hasSeq && seq <= l.lastSeq {
+		l.mu.Unlock()
+		return
+	}
 	if l.hasSeq && seq > l.lastSeq+1 {
 		l.gaps.Add(1)
 	}
@@ -276,19 +407,44 @@ func ingestableSpecKind(kind string) bool {
 // ingest applies a decoded batch to the residency index.
 func (l *Listener) ingest(batch *Batch) {
 	ix, namespace, seed, blockSize, ok := l.resolver.ResolveIngest(l.model, l.engineID)
+	nano := l.now().UnixNano()
 	if !ok {
+		for i := range batch.Events {
+			l.recordEvent(batch, &batch.Events[i], "", "", nil, false, "no_resolver")
+		}
+		l.events.Add(int64(len(batch.Events)))
+		l.mu.Lock()
+		l.lastEvent = nano
+		l.mu.Unlock()
 		return
 	}
-	_ = namespace
-	nano := l.now().UnixNano()
 	for i := range batch.Events {
 		ev := &batch.Events[i]
 		switch ev.Kind {
 		case KindBlockStored:
 			if !ingestableSpecKind(ev.SpecKind) {
+				l.recordEvent(batch, ev, namespace, "", nil, false, "non_ingestable_spec_kind")
+				continue
+			}
+			if ev.HasNestedTokenIDs {
+				l.recordEvent(batch, ev, namespace, "", nil, false, "unsupported_nested_token_ids")
+				continue
+			}
+			if hasUnsupportedFeatureKeys(ev) {
+				l.recordEvent(batch, ev, namespace, "", nil, false, "unsupported_hash_extra_keys")
 				continue
 			}
 			tier := mediumToTier(ev.Medium)
+			if len(ev.TokenIDs) == 0 && len(ev.BlockHashes) > 0 {
+				reqKeys, ok := ix.StoreEventByEngineKeys(l.engineID, batch.DPRank, tier, toEngineKeys(ev.BlockHashes))
+				if !ok {
+					l.skipped.Add(1)
+					l.recordEvent(batch, ev, namespace, tier, nil, false, "unresolved_engine_key")
+					continue
+				}
+				l.recordEvent(batch, ev, namespace, tier, reqKeys, true, "")
+				continue
+			}
 			// Effective block size: trust the event's block_size if present.
 			bs := ev.BlockSize
 			if bs <= 0 {
@@ -305,18 +461,27 @@ func (l *Listener) ingest(batch *Batch) {
 			reqKeys, ok := l.requestKeysForEvent(ix, l.engineID, seed, bs, ev)
 			if !ok {
 				l.skipped.Add(1)
+				l.recordEvent(batch, ev, namespace, tier, nil, false, "unresolved_parent")
+				continue
+			}
+			if len(reqKeys) == 0 {
+				l.skipped.Add(1)
+				l.recordEvent(batch, ev, namespace, tier, nil, false, "no_full_token_block")
 				continue
 			}
 			engKeys := toEngineKeys(ev.BlockHashes)
 			ix.StoreEvent(l.engineID, batch.DPRank, tier, engKeys, reqKeys)
+			l.recordEvent(batch, ev, namespace, tier, reqKeys, true, "")
 		case KindBlockRemoved:
 			// Removes are always processed: BlockRemoved carries no spec_kind,
 			// and a remove for a block we never indexed is a harmless no-op
 			// (the bridge lookup simply misses).
 			tier := mediumToTier(ev.Medium)
 			ix.RemoveEvent(l.engineID, batch.DPRank, tier, toEngineKeys(ev.BlockHashes))
+			l.recordEvent(batch, ev, namespace, tier, nil, true, "")
 		case KindAllBlocksCleared:
 			ix.ClearEngine(l.engineID, "")
+			l.recordEvent(batch, ev, namespace, "", nil, true, "")
 		}
 	}
 	l.events.Add(int64(len(batch.Events)))
@@ -365,24 +530,92 @@ func mediumToTier(medium string) string {
 	}
 }
 
+func hasUnsupportedFeatureKeys(ev *Event) bool {
+	return ev.HasExtraKeys || ev.HasLoraID || ev.LoraName != ""
+}
+
+func (l *Listener) recordEvent(batch *Batch, ev *Event, namespace, tier string, reqKeys []residency.RequestKey, indexed bool, skipReason string) {
+	if l.sink == nil || ev == nil {
+		return
+	}
+	rec := KVEventRecord{
+		ObservedAt:     l.now(),
+		EngineID:       l.engineID,
+		Model:          l.model,
+		Namespace:      namespace,
+		Seq:            strconv.FormatUint(batch.Seq, 10),
+		BatchTS:        batch.TS,
+		DPRank:         batch.DPRank,
+		Kind:           string(ev.Kind),
+		BlockHashes:    uint64Strings(ev.BlockHashes),
+		TokenIDs:       append([]int32(nil), ev.TokenIDs...),
+		NestedTokenIDs: ev.HasNestedTokenIDs,
+		BlockSize:      ev.BlockSize,
+		Medium:         ev.Medium,
+		Tier:           tier,
+		LoraName:       ev.LoraName,
+		ExtraKeys:      append([]string(nil), ev.ExtraKeys...),
+		ExtraKeyCount:  ev.ExtraKeyCount,
+		GroupIdx:       ev.GroupIdx,
+		SpecKind:       ev.SpecKind,
+		RequestKeys:    requestKeyStrings(reqKeys),
+		Indexed:        indexed,
+		SkipReason:     skipReason,
+	}
+	if ev.HasLoraID {
+		id := ev.LoraID
+		rec.LoraID = &id
+	}
+	if ev.HasSlidingWindow {
+		rec.SlidingWindow = ev.SlidingWindow
+	}
+	if ev.HasParent {
+		rec.ParentHash = strconv.FormatUint(ev.ParentHash, 10)
+	}
+	l.sink.RecordKVEvent(rec)
+}
+
+func uint64Strings(in []uint64) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = strconv.FormatUint(v, 10)
+	}
+	return out
+}
+
+func requestKeyStrings(in []residency.RequestKey) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	for i, v := range in {
+		out[i] = strconv.FormatUint(uint64(v), 10)
+	}
+	return out
+}
+
 // Health returns a snapshot of listener health.
 func (l *Listener) Health() StreamHealth {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return StreamHealth{
-		EngineID:      l.engineID,
-		Endpoint:      l.endpoint,
-		Topic:         l.topic,
-		Connected:     l.connected,
-		LastSeq:       l.lastSeq,
-		LastEventUnix: l.lastEvent / 1e9,
-		EventsTotal:   l.events.Load(),
-		GapsTotal:     l.gaps.Load(),
-		SkippedTotal:  l.skipped.Load(),
-		DecodeErrors:  l.decErrs.Load(),
-		QueueDepth:    int(l.queueLen.Load()),
-		QueueCap:      applyQueueSize,
-		LastError:     l.lastErr,
+		EngineID:       l.engineID,
+		Endpoint:       l.endpoint,
+		ReplayEndpoint: l.replayEndpoint,
+		Topic:          l.topic,
+		Connected:      l.connected,
+		LastSeq:        l.lastSeq,
+		LastEventUnix:  l.lastEvent / 1e9,
+		EventsTotal:    l.events.Load(),
+		GapsTotal:      l.gaps.Load(),
+		SkippedTotal:   l.skipped.Load(),
+		DecodeErrors:   l.decErrs.Load(),
+		QueueDepth:     int(l.queueLen.Load()),
+		QueueCap:       applyQueueSize,
+		LastError:      l.lastErr,
 	}
 }
 

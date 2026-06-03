@@ -50,7 +50,11 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
 
 ```
                             ┌──────────────────────────────┐
-  browser ── http ─────────▶│  kvgateway  :8095            │   federation + config authority
+  browser ── http ─────────▶│  Next console :3000          │   same-origin
+                            │  /api/kvi/* proxy            │   browser only needs :3000
+                            └──────────────┬───────────────┘
+                            ┌──────────────────────────────┐
+                            │  kvgateway  :8095            │   federation + config authority
                             │  (fan-out reads, proxy writes)│   SQLite connection registry
                             │   ── never touches ZMQ ──     │   (which kvindexers + tokens)
                             └───────┬──────────────┬────────┘
@@ -58,8 +62,8 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
                    ┌────────────────▼───┐    ┌─────▼──────────────┐
                    │ kvindexer :8090    │    │ kvindexer :8091    │   one per CLUSTER,
                    │ cluster=local-vllm │    │ cluster=local-sglang│  next to its engines
-                   │  STATELESS (memory)│    │  STATELESS (memory)│   loads its 1 cluster
-                   │  loads config.yaml │    │  loads config.yaml │   from YAML each boot
+                   │ Mongo config/events │    │ Mongo config/events │ loads its own cluster
+                   │ local-vllm.yaml     │    │ local-sglang.yaml   │ seed when Mongo empty
                    └─────────┬──────────┘    └─────────┬──────────┘
               ZMQ SUB (local)│ tcp://127.0.0.1:5559    │ tcp://127.0.0.1:5557
                    ┌─────────▼──────────┐    ┌─────────▼──────────┐
@@ -71,14 +75,15 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
 - A **cluster** is a `(GPU pool + serving framework + model)` unit, e.g. *"H20 pool #1,
   SGLang, Qwen3"*. It is the top-level dimension everywhere (config, console, gateway).
 - **kvindexer** — one process **per cluster**, co-located with that cluster's engines so
-  the ZMQ KV-event stream stays node-local. It subscribes to events, builds the residency
-  index, and judges admission. It is **stateless** (`-store memory`): it loads its single
-  cluster from `config.yaml` into memory on every boot — no local database. The API is
-  guarded by a **bearer token** (`-auth-token`) because the gateway reaches it over the
-  network.
-- **kvgateway** — the federation layer **and** the config authority. It owns a **SQLite
-  connection registry** (which kvindexers exist, their URLs, and their bearer tokens),
-  seeded once from `config.yaml` and editable live via `/admin/connections`. It fans GET
+  the ZMQ KV-event stream stays node-local. It subscribes to events, builds the in-memory
+  residency index, persists decoded prefix-cache events (`token_ids`, request keys, engine
+  hashes) to MongoDB, and judges admission. Its config store can be `memory`, `file`,
+  `sqlite`, or `mongo`; local dev uses `-store mongo` so frontend policy edits survive
+  restart.
+- **kvgateway** — the federation layer **and** the connection authority. It owns a
+  **SQLite connection registry** (which kvindexers exist, their URLs, and their bearer
+  tokens), seeded once from one or more YAML files and editable live via
+  `/admin/connections`. It fans GET
   lists out to every cluster's kvindexer (tagging each row with `_cluster`/`_backend`),
   proxies writes/queries to one backend selected by `?cluster=`, and **attaches the bearer
   token to every call**. It does not subscribe to ZMQ — see [docs/scaling.md](docs/scaling.md).
@@ -86,7 +91,7 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
   with `?cluster=`.
 
 > **Topology note.** State is centralized in the **gateway** (the connection registry),
-> while kvindexers are stateless workers next to the GPUs. This suits a deployment where
+> while kvindexers sit next to the GPUs. This suits a deployment where
 > the gateway is central and kvindexers sit remotely beside their clusters, reached over
 > the (firewalled) network with a shared bearer token.
 
@@ -94,8 +99,7 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
 internal/
   types/        shared request types
   config/       dynamic config store (clusters/engines/profiles/policies); versioning +
-                audit + effective-policy merge; persisters: memory | file JSON | SQLite;
-                YAML bootstrap (nested config.yaml), seed-once / load-each-boot
+                audit + effective-policy merge; persisters: memory | file JSON | SQLite | MongoDB
   normalize/    protocol -> RouteRequest; framework adapters (AdapterFor("vllm"|"sglang"))
   tokenizer/    HTTP client to the engine /tokenize endpoint (never tokenizes locally)
   residency/    dual-key prefix index (request_key + engine_key bridge) + manager
@@ -103,10 +107,10 @@ internal/
   admission/    the length + cache-hit-rate judgment
   gateway/      multi-cluster HTTP federation + SQLite connection registry (cmd/kvgateway)
   httpapi/      service wiring + HTTP handlers + bearer auth + CORS (cmd/kvindexer)
-cmd/kvindexer/  per-cluster admission service (stateless)
+cmd/kvindexer/  per-cluster admission service
 cmd/kvgateway/  federation gateway + connection registry
 web/            Next.js 16 management console
-deploy/         config.local.yaml (topology) + serve-*.sh (engines) + smoke.py (e2e)
+deploy/         local-*.yaml (per-cluster topology) + serve-*.sh (engines) + smoke.py (e2e)
 docs/           kv-events.md · tokenization.md · configuration.md · scaling.md
 ```
 
@@ -166,7 +170,8 @@ make status             # show listening ports + per-cluster health
 ```
 
 Open the console at **http://127.0.0.1:3000** (loopback only — tunnel over SSH to view
-it from your laptop: `ssh -L 3000:127.0.0.1:3000 <host>`).
+it from your laptop: `ssh -L 3000:127.0.0.1:3000 <host>`). Browser API calls go through
+the frontend's `/api/kvi/*` proxy, so a frontend-only tunnel is enough for the console.
 
 ### 3. Verify the whole loop
 
@@ -206,9 +211,11 @@ make stop-inference   # stop the engines too
 
 ## Configuration
 
-Everything is described by **one nested file**, [`deploy/config.local.yaml`](deploy/config.local.yaml).
-Each cluster owns its engines + models; the loader flattens this into normalized
-clusters/engines/profiles tables. Full reference: **[docs/configuration.md](docs/configuration.md)**.
+Local dev uses **one YAML file per cluster**:
+[`deploy/local-vllm.yaml`](deploy/local-vllm.yaml) and
+[`deploy/local-sglang.yaml`](deploy/local-sglang.yaml). Each cluster owns its engines +
+models; the loader flattens this into normalized clusters/engines/profiles tables. Full
+reference: **[docs/configuration.md](docs/configuration.md)**.
 
 ```yaml
 clusters:
@@ -226,16 +233,15 @@ clusters:
         kv_event_endpoint: tcp://127.0.0.1:5559   # kvindexer SUBs here (connect)
         replay_endpoint:  tcp://127.0.0.1:5560
         served_models: [qwen3.5-4b]
-# ... a second cluster (local-sglang, framework sglang, block_size 64) ...
 policies:
   - policy_id: local-default
     long_prompt_threshold_tokens: 256
     min_hit_ratio_for_long_prompt: 0.5
 ```
 
-- Each kvindexer seeds from this file **scoped to its `-cluster`**, once, when its SQLite
-  store is empty. After that the **store is authoritative** and the console mutates it.
-  Re-seed with `make clean` (drops `run/*.db`).
+- Each kvindexer seeds from its own YAML **scoped to its `-cluster`**, once, when its
+  MongoDB config snapshot is empty. After that **MongoDB is authoritative** and the
+  console mutates it. Re-seed with `make clean-mongo` (drops the Mongo volume).
 - `block_size` **must match the engine**: vLLM full_attention = 528 for qwen3.5-4b;
   SGLang `--page-size` = 64. A mismatch produces request_keys that never match.
 - `hash_profile` defaults to `<framework>-v1-text` and is part of the namespace, so a
@@ -243,19 +249,24 @@ policies:
 
 ### Persistence
 
-The **kvindexer is stateless**: `-store memory` (the default) loads its single cluster
-from `-bootstrap config.yaml` into memory on every boot — no local database. For a
-standalone / single-process deployment it can still persist locally:
+Local dev runs MongoDB in Docker (`make mongo`) and starts both kvindexers with
+`-store mongo`. Policies/config snapshots are mirrored into MongoDB collections
+(`policies`, `clusters`, `engines`, `profiles`, `audit`, `config_snapshots`), and decoded
+ZMQ KV events are appended to `prefix_cache_events` with `token_ids` and `request_keys`.
+Other store modes remain available:
 
-- **memory** (default) — stateless; config comes from `config.yaml` each boot. Use this
+- **memory** (default) — stateless; config comes from `-bootstrap` YAML each boot. Use this
   for a remote per-cluster kvindexer fronted by the gateway.
+- **mongo** — `-mongo-uri ... -mongo-db ...`, persistent dynamic config plus
+  prefix-cache event sink. This is the local dev default.
 - **sqlite** — `-sqlite-path path.db`, pure-Go, a real local store (config mutations
   survive restart). Use for a standalone kvindexer with no gateway.
 - **file** — `-config data/config.json`, a single JSON snapshot.
 
 The **gateway** owns the connection registry in **SQLite** (`-sqlite-path`): the list of
-kvindexers (`{id, cluster, url, token, enabled}`), seeded once from `config.yaml`
-(`-config`) with the shared `-backend-token`, then authoritative and editable live via
+kvindexers (`{id, cluster, url, token, enabled}`), seeded once from YAML
+(`-config` or comma-separated `-configs`) with the shared `-backend-token`, then
+authoritative and editable live via
 `/admin/connections` (`GET` / `POST` / `DELETE /admin/connections/{id}`).
 
 ---
@@ -266,25 +277,29 @@ kvindexers (`{id, cluster, url, token, enabled}`), seeded once from `config.yaml
 
 - Control plane (`kvindexer` :8090/:8091, `kvgateway` :8095, frontend :3000) binds
   **`127.0.0.1`** (Makefile `BIND := 127.0.0.1`).
-- Engine **HTTP/tokenizer** (`:8000`, `:30000`) binds `127.0.0.1` (`--host 127.0.0.1`).
+- vLLM **HTTP/tokenizer** (`:8000`) binds `0.0.0.0` for external testing and is allowed
+  through `ufw`; the local script has no auth, so keep it on a trusted network.
+- SGLang **HTTP/tokenizer** (`:30000`) still binds `127.0.0.1`.
 - Engine **ZMQ PUB** (`:5557`, `:5559`) binds `0.0.0.0` — unavoidable (see below) — and
   is kept private by the firewall.
-- **`ufw`**: `default deny incoming`, only `22/tcp` (SSH) allowed. Enable once:
+- **`ufw`**: `default deny incoming`, `22/tcp` (SSH) and `8000/tcp` (vLLM API) allowed.
+  Enable once:
 
   ```bash
   sudo ufw allow 22/tcp
+  sudo ufw allow 8000/tcp
   sudo ufw default deny incoming
   sudo ufw --force enable
-  sudo ufw status verbose      # verify only 22 is open
+  sudo ufw status verbose
   ```
 
-  Verify nothing else is reachable from the host IP:
+  Verify vLLM is reachable and the other local-only ports are not:
 
   ```bash
   HOST_IP=$(ip -4 addr show | grep -oP 'inet \K10[0-9.]+' | head -1)
   for p in 8000 30000 8090 8095 3000 5559; do
     curl -s --max-time 2 -o /dev/null -w "$p: %{http_code}\n" http://$HOST_IP:$p/ || echo "$p: blocked"
-  done   # every line should be "blocked"/000; loopback (127.0.0.1) still works
+  done   # 8000 should answer; the rest should be blocked/000.
   ```
 
   Only block-hashes and token-ids ever traverse the ZMQ stream — no prompt text — but it
@@ -343,8 +358,9 @@ writes/queries target one backend).
 | POST | `/query-prefix` | Mooncake/Dynamo-style per-instance prefix hits |
 | POST | `/tokenize/preview` | tokens + request-keys for a request (per framework adapter) |
 | POST | `/config/effective-policy/preview` | resolve merged policy |
-| GET/POST/PATCH | `/clusters`, `/engines`, `/model-profiles`, `/policies` | config CRUD |
-| GET | `/event-streams`, `/decisions`, `/config/audit-log`, `/index/stats` | observability |
+| GET/POST/PATCH/DELETE | `/clusters`, `/engines`, `/model-profiles`, `/policies` | config CRUD (`DELETE` currently applies to policies via `/policies/{id}` and admin connections via the gateway) |
+| GET | `/event-streams`, `/kv-events/recent`, `/decisions`, `/config/audit-log`, `/index/stats` | observability |
+| GET (SSE) | `/kv-events/stream` | live decoded KV-event stream for one selected backend/cluster |
 | GET | `/clusters-health` *(gateway)* | per-cluster backend health |
 
 A 429 returns a structured reason:
@@ -382,7 +398,7 @@ make smoke         # end-to-end against the live engines (needs `make inference`
 
 ## Further reading
 
-- [docs/configuration.md](docs/configuration.md) — the nested `config.yaml`, clusters,
+- [docs/configuration.md](docs/configuration.md) — nested YAML bootstraps, clusters,
   block sizes, persistence, multi-cluster production layout.
 - [docs/kv-events.md](docs/kv-events.md) — the ZMQ KV-event wire format (vLLM + SGLang).
 - [docs/tokenization.md](docs/tokenization.md) — how each protocol becomes engine

@@ -5,55 +5,74 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+	"github.com/ucloud/kv-indexer/internal/openapi"
 	"github.com/ucloud/kv-indexer/internal/types"
 )
 
-// Router builds the HTTP mux with all endpoints registered.
+// Router builds the HTTP router with all endpoints registered.
 func (s *Service) Router() http.Handler {
-	mux := http.NewServeMux()
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
 
 	// Admission judgment endpoints, one per inbound protocol.
-	mux.HandleFunc("POST /route", s.handleRoute(types.ProtocolOpenAIChat))
-	mux.HandleFunc("POST /v1/chat/completions", s.handleRoute(types.ProtocolOpenAIChat))
-	mux.HandleFunc("POST /v1/responses", s.handleRoute(types.ProtocolOpenAIResponses))
-	mux.HandleFunc("POST /v1/messages", s.handleRoute(types.ProtocolAnthropic))
+	r.POST("/route", httpHandler(s.handleRoute(types.ProtocolOpenAIChat)))
+	r.POST("/v1/chat/completions", httpHandler(s.handleRoute(types.ProtocolOpenAIChat)))
+	r.POST("/v1/responses", httpHandler(s.handleRoute(types.ProtocolOpenAIResponses)))
+	r.POST("/v1/messages", httpHandler(s.handleRoute(types.ProtocolAnthropic)))
 
 	// Query + previews.
-	mux.HandleFunc("POST /query-prefix", s.handleQueryPrefix)
-	mux.HandleFunc("POST /tokenize/preview", s.handleTokenizePreview)
-	mux.HandleFunc("POST /config/effective-policy/preview", s.handleEffectivePolicyPreview)
+	r.POST("/query-prefix", httpHandler(s.handleQueryPrefix))
+	r.POST("/tokenize/preview", httpHandler(s.handleTokenizePreview))
+	r.POST("/config/effective-policy/preview", httpHandler(s.handleEffectivePolicyPreview))
 
 	// Clusters.
-	mux.HandleFunc("GET /clusters", s.handleListClusters)
-	mux.HandleFunc("POST /clusters", s.handleCreateCluster)
-	mux.HandleFunc("PATCH /clusters/{id}", s.handlePatchCluster)
+	r.GET("/clusters", httpHandler(s.handleListClusters))
+	r.POST("/clusters", httpHandler(s.handleCreateCluster))
+	r.PATCH("/clusters/:id", httpHandler(s.handlePatchCluster, "id"))
 
 	// Engines.
-	mux.HandleFunc("GET /engines", s.handleListEngines)
-	mux.HandleFunc("POST /engines/register", s.handleRegisterEngine)
-	mux.HandleFunc("POST /engines/unregister", s.handleUnregisterEngine)
-	mux.HandleFunc("PATCH /engines/{id}", s.handlePatchEngine)
+	r.GET("/engines", httpHandler(s.handleListEngines))
+	r.POST("/engines/register", httpHandler(s.handleRegisterEngine))
+	r.POST("/engines/unregister", httpHandler(s.handleUnregisterEngine))
+	r.PATCH("/engines/:id", httpHandler(s.handlePatchEngine, "id"))
 
 	// Model profiles.
-	mux.HandleFunc("GET /model-profiles", s.handleListModelProfiles)
-	mux.HandleFunc("POST /model-profiles", s.handleCreateModelProfile)
+	r.GET("/model-profiles", httpHandler(s.handleListModelProfiles))
+	r.POST("/model-profiles", httpHandler(s.handleCreateModelProfile))
 
 	// Policies.
-	mux.HandleFunc("GET /policies", s.handleListPolicies)
-	mux.HandleFunc("POST /policies", s.handleCreatePolicy)
-	mux.HandleFunc("PATCH /policies/{id}", s.handlePatchPolicy)
+	r.GET("/policies", httpHandler(s.handleListPolicies))
+	r.POST("/policies", httpHandler(s.handleCreatePolicy))
+	r.PATCH("/policies/:id", httpHandler(s.handlePatchPolicy, "id"))
+	r.DELETE("/policies/:id", httpHandler(s.handleDeletePolicy, "id"))
 
 	// Observability.
-	mux.HandleFunc("GET /event-streams", s.handleEventStreams)
-	mux.HandleFunc("GET /decisions", s.handleDecisions)
-	mux.HandleFunc("GET /config/audit-log", s.handleAudit)
-	mux.HandleFunc("GET /config/versions", s.handleConfigVersion)
-	mux.HandleFunc("GET /index/stats", s.handleIndexStats)
-	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	r.GET("/event-streams", httpHandler(s.handleEventStreams))
+	r.GET("/kv-events/recent", httpHandler(s.handleRecentKVEvents))
+	r.GET("/kv-events/stream", httpHandler(s.handleKVEventStream))
+	r.GET("/decisions", httpHandler(s.handleDecisions))
+	r.GET("/config/audit-log", httpHandler(s.handleAudit))
+	r.GET("/config/versions", httpHandler(s.handleConfigVersion))
+	r.GET("/index/stats", httpHandler(s.handleIndexStats))
+	r.GET("/healthz", httpHandler(s.handleHealthz))
+	r.GET("/openapi.json", func(c *gin.Context) {
+		c.JSON(http.StatusOK, openapi.KVIndexerSpec())
+	})
 
 	// CORS is outermost (so OPTIONS preflight never needs the token); auth sits
 	// just inside it and gates every route except /healthz (liveness probe).
-	return withCORS(s.withAuth(mux))
+	return withCORS(s.withAuth(r))
+}
+
+func httpHandler(h http.HandlerFunc, pathParams ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		for _, name := range pathParams {
+			c.Request.SetPathValue(name, c.Param(name))
+		}
+		h(c.Writer, c.Request)
+	}
 }
 
 // withAuth enforces "Authorization: Bearer <AuthToken>" when AuthToken is set.

@@ -5,8 +5,8 @@
 //
 // The gateway OWNS the connection registry in SQLite (-sqlite-path): the list of
 // kvindexers it federates ({id, cluster, url, token, enabled}). On first boot an
-// empty registry is SEEDED from -config (the SAME topology config.yaml the
-// kvindexers use) — one connection per clusters[].backends URL, id
+// empty registry is SEEDED from -config/-configs topology YAML — one connection
+// per clusters[].backends URL, id
 // "<cluster>-N", carrying the shared -backend-token. Thereafter the registry is
 // authoritative and is managed live via the /admin/connections CRUD endpoints.
 package main
@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,7 +30,8 @@ func main() {
 	var (
 		addr         = flag.String("addr", ":8095", "HTTP listen address")
 		sqlitePath   = flag.String("sqlite-path", "data/gateway.db", "SQLite connection registry path: the gateway manages kvindexer connections here and serves /admin/connections CRUD")
-		configPath   = flag.String("config", "", "shared topology config.yaml; on first boot its clusters[].backends SEED the (empty) connection registry")
+		configPath   = flag.String("config", "", "topology YAML; on first boot its clusters[].backends SEED the (empty) connection registry")
+		configPaths  = flag.String("configs", "", "comma-separated topology config YAML files; merged for first-boot connection seeding")
 		backendToken = flag.String("backend-token", "", "bearer token the gateway sends to every kvindexer (env KVGATEWAY_BACKEND_TOKEN); applied to seeded connections")
 	)
 	flag.Parse()
@@ -39,7 +41,7 @@ func main() {
 	}
 
 	// The gateway OWNS the connection registry in SQLite (inverse topology — the
-	// kvindexers are stateless). Seed once from -config when the DB is empty, then
+	// Seed once from -config/-configs when the DB is empty, then
 	// the DB + /admin/connections are authoritative.
 	store, err := gateway.OpenConnStore(*sqlitePath)
 	if err != nil {
@@ -47,16 +49,13 @@ func main() {
 	}
 	defer store.Close()
 
-	if *configPath != "" {
-		bs, err := config.LoadBootstrap(*configPath)
-		if err != nil {
-			log.Fatalf("read config %s: %v", *configPath, err)
-		}
-		seed := connectionsFromConfig(bs, *backendToken)
+	paths := splitConfigPaths(*configPath, *configPaths)
+	if len(paths) > 0 {
+		seed := connectionsFromConfigs(paths, *backendToken)
 		if ok, err := store.SeedIfEmpty(seed); err != nil {
 			log.Fatalf("seed connections: %v", err)
 		} else if ok {
-			log.Printf("seeded %d connection(s) from %s into %s", len(seed), *configPath, *sqlitePath)
+			log.Printf("seeded %d connection(s) from %s into %s", len(seed), strings.Join(paths, ","), *sqlitePath)
 		} else {
 			log.Printf("connection registry already populated (%d rows); not re-seeding", store.Count())
 		}
@@ -101,10 +100,36 @@ func hasTok(t string) string {
 	return "none"
 }
 
+func splitConfigPaths(configPath, configPaths string) []string {
+	var out []string
+	if configPath != "" {
+		out = append(out, configPath)
+	}
+	for _, p := range strings.Split(configPaths, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func connectionsFromConfigs(paths []string, token string) []gateway.Connection {
+	var out []gateway.Connection
+	for _, path := range paths {
+		bs, err := config.LoadBootstrap(path)
+		if err != nil {
+			log.Fatalf("read config %s: %v", path, err)
+		}
+		out = append(out, connectionsFromConfig(bs, token)...)
+	}
+	return out
+}
+
 // connectionsFromConfig derives the seed connection list from the shared topology
 // config's clusters[].backends, applying the shared bearer token to each. A
 // cluster's `enabled` flag is honored (nil = enabled), matching how the kvindexer
-// treats it — so a cluster taken out of service in config.yaml is not federated.
+// treats it — so a cluster taken out of service in YAML is not federated.
 func connectionsFromConfig(bs *config.Bootstrap, token string) []gateway.Connection {
 	var out []gateway.Connection
 	for _, c := range bs.AllClusters() {

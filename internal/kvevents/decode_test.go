@@ -100,3 +100,56 @@ func TestDecodeShortArrayTolerated(t *testing.T) {
 		t.Fatalf("bad minimal decode: %+v", ev)
 	}
 }
+
+func TestDecodeVLLMOptionalFields(t *testing.T) {
+	fields := []any{
+		"BlockStored",
+		[]any{uint64(99)},
+		uint64(11),
+		[]any{int64(1), int64(2), int64(3), int64(4)},
+		int64(4),
+		int64(7),
+		"GPU",
+		"adapter-a",
+		[]any{[]any{"image-hash", int64(0)}, nil},
+		int64(3),
+		"sliding_window",
+		int64(4096),
+	}
+	ev, ok := decodeEvent(KindBlockStored, fields)
+	if !ok {
+		t.Fatal("should decode full vLLM BlockStored")
+	}
+	if !ev.HasParent || ev.ParentHash != 11 {
+		t.Fatalf("parent not decoded: %+v", ev)
+	}
+	if !ev.HasLoraID || ev.LoraID != 7 || ev.LoraName != "adapter-a" {
+		t.Fatalf("lora not decoded: %+v", ev)
+	}
+	if !ev.HasExtraKeys || ev.ExtraKeyCount != 1 || len(ev.ExtraKeys) != 1 {
+		t.Fatalf("extra keys not decoded: %+v", ev)
+	}
+	if ev.GroupIdx != 3 || ev.SpecKind != "sliding_window" || !ev.HasSlidingWindow || ev.SlidingWindow != 4096 {
+		t.Fatalf("group/spec metadata not decoded: %+v", ev)
+	}
+}
+
+func TestDecodeNestedTokenIDsFlagged(t *testing.T) {
+	fields := []any{
+		"BlockStored",
+		[]any{uint64(99)},
+		nil,
+		[]any{[]any{int64(1), int64(2)}, []any{int64(2), int64(3)}},
+		int64(2),
+	}
+	ev, ok := decodeEvent(KindBlockStored, fields)
+	if !ok {
+		t.Fatal("should decode nested-token BlockStored")
+	}
+	if !ev.HasNestedTokenIDs {
+		t.Fatalf("nested token ids should be flagged: %+v", ev)
+	}
+	if len(ev.TokenIDs) != 0 {
+		t.Fatalf("nested token ids should not be flattened into request keys: %+v", ev.TokenIDs)
+	}
+}

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Serve qwen3.5-4b on vLLM for the `local-vllm` cluster.
 #
-# Binds HTTP + ZMQ to 127.0.0.1 ONLY (this box has a public IP; never expose an
-# inference engine or its KV-event stream to the internet — the firewall is a
-# backstop, loopback binding is the primary defense).
+# Binds HTTP on all interfaces for external testing. Keep this behind a firewall
+# or trusted network; vLLM has no auth in this local script.
 #
-#   HTTP API + tokenizer : http://127.0.0.1:8000   (--host 127.0.0.1)
+#   HTTP API + tokenizer : http://0.0.0.0:8000     (--host 0.0.0.0)
 #   KV events (ZMQ PUB)  : tcp://*:5559            (kvindexer connects to :5559)
 #   KV events replay     : tcp://127.0.0.1:5560    (ROUTER, gap recovery)
 #
@@ -22,7 +21,7 @@
 # qwen3.5-4b is a hybrid (Mamba + full-attention) model; --mamba-cache-mode align
 # keeps the full-attention KV blocks page-aligned so prefix caching + KV events
 # work. The full_attention group block size is 528 (this is what the kvindexer's
-# vllm-v1-text profile must use — see deploy/config.local.yaml).
+# vllm-v1-text profile must use — see deploy/local-vllm.yaml).
 set -euo pipefail
 
 ROOT=/home/ubuntu/selfhost-schedular
@@ -35,7 +34,7 @@ export PYTHONHASHSEED=0   # stable namespace hashing across restarts
 
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.5-4b \
-  --host 127.0.0.1 \
+  --host 0.0.0.0 \
   --port 8000 \
   --trust-remote-code \
   --dtype bfloat16 \

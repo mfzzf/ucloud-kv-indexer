@@ -33,7 +33,7 @@ gateway does the fan-out, merge, and write-routing centrally.
 | --- | --- | --- |
 | Fan-out GET | `/clusters` `/engines` `/model-profiles` `/policies` `/event-streams` `/index/stats` `/decisions` `/config/audit-log` | Query every selected backend, tag each array element with `_region` + `_backend`, merge. `/decisions` sorted by timestamp, `/config/audit-log` by version. A dead backend is logged and skipped, never blanks the response. |
 | Aggregate | `/config/versions` | Per-backend `{region, backend, config_version}` array. |
-| Write proxy | `POST/PATCH` on clusters, engines (`register`/`unregister`/`{id}`), `model-profiles`, `policies` | Proxied to **exactly one** backend. Selector must resolve to one — ambiguous → `400`, no match → `404`. Response carries `X-KVI-Backend` / `X-KVI-Region`. |
+| Write proxy | `POST/PATCH` on clusters, engines (`register`/`unregister`/`{id}`), `model-profiles`, `policies`; `DELETE /policies/{id}` | Proxied to **exactly one** backend. Selector must resolve to one — ambiguous → `400`, no match → `404`. Response carries `X-KVI-Backend` / `X-KVI-Region`. |
 | Admission / query proxy | `POST` `/route` `/v1/chat/completions` `/v1/responses` `/v1/messages` `/query-prefix` `/tokenize/preview` `/config/effective-policy/preview` | Proxied to one selected backend. |
 | Gateway-native | `GET /regions` `GET /healthz` | `/regions` groups backends by region and live-probes each `/healthz`. |
 

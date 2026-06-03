@@ -4,22 +4,22 @@
 #                                              └────▶ kvindexer local-sglang (:8091)
 #
 # Each kvindexer sits next to ONE inference engine and SUBs its ZMQ KV-event
-# stream locally; the gateway federates both for the console. Everything binds
-# 127.0.0.1 ONLY (this box has a public IP — never expose a port).
+# stream locally; the gateway federates both for the console. Only the frontend
+# is exposed by default; gateway, kvindexer, MongoDB, and inference stay loopback.
 #
 #   local-vllm    vLLM   qwen3.5-4b  :8000   ZMQ 5559/5560   (deploy/serve-vllm.sh)
 #   local-sglang  SGLang qwen3-0.6b  :30000  ZMQ 5557/5558   (deploy/serve-sglang.sh)
 #
 # Inference engines are managed SEPARATELY — `make inference` starts them,
-# `make down` NEVER stops them. Each kvindexer is STATELESS (`-store memory`):
-# it loads its one cluster from ONE nested file (deploy/config.local.yaml) into
-# memory each boot. The GATEWAY owns the connection registry (SQLite) and sends a
+# `make down` NEVER stops them. Each kvindexer has its OWN bootstrap file and
+# persists dynamic config/policies plus decoded prefix-cache events in local
+# MongoDB. The GATEWAY owns only the connection registry (SQLite) and sends a
 # bearer token to each kvindexer (which requires it).
 #
 # Quick start (from zero):
 #   make inference     # start vLLM + SGLang on the GPU (wait for ready)
 #   make build         # compile Go binaries + web prod build
-#   make up            # start gateway + both kvindexer backends + frontend
+#   make up            # start MongoDB + gateway + both kvindexer backends + frontend
 #   make status        # show what's listening + cluster health
 #   make smoke         # tokenize+query both clusters end-to-end
 #   make down          # stop the control plane (NOT inference)
@@ -34,13 +34,13 @@ NODE_BIN := /home/ubuntu/.local/node20/bin
 NPM      := $(NODE_BIN)/npm
 export PATH := $(NODE_BIN):$(PATH)
 
-# --- control-plane ports (all bind 127.0.0.1) ---
+# --- control-plane ports ---
 PORT_VLLM_KVI   := 8090
 PORT_SGLANG_KVI := 8091
 PORT_GW         := 8095
 PORT_WEB        := 3000
 
-# --- cluster ids (must match deploy/config.local.yaml) ---
+# --- cluster ids (must match deploy/local-*.yaml) ---
 CLUSTER_VLLM   := local-vllm
 CLUSTER_SGLANG := local-sglang
 
@@ -51,20 +51,31 @@ KVINDEXER:= $(BIN)/kvindexer
 KVGATEWAY:= $(BIN)/kvgateway
 
 # --- config ---
-# ONE nested file describes the topology. Each kvindexer is STATELESS: it loads
-# its single cluster from this file into memory (-store memory) every boot. The
-# GATEWAY owns the connection registry in SQLite (which kvindexers exist + their
-# bearer tokens), seeded once from this file.
-CONFIG       := $(ROOT)/deploy/config.local.yaml
-GW_SQLITE    := $(RUN)/gateway-connections.db
+# Each kvindexer gets its own cluster-local bootstrap file. The gateway reads
+# both files only to seed its federated backend registry.
+CONFIG_VLLM        := $(ROOT)/deploy/local-vllm.yaml
+CONFIG_SGLANG      := $(ROOT)/deploy/local-sglang.yaml
+GATEWAY_CONFIGS    := $(CONFIG_VLLM),$(CONFIG_SGLANG)
+GW_SQLITE          := $(RUN)/gateway-connections.db
+
+# --- MongoDB (local Docker) ---
+DOCKER             := $(shell if docker ps >/dev/null 2>&1; then echo docker; elif sudo -n docker ps >/dev/null 2>&1; then echo "sudo -n docker"; else echo docker; fi)
+MONGO_IMAGE        := mongo:8
+MONGO_CONTAINER    := ucloud-kv-indexer-mongo
+MONGO_VOLUME       := ucloud-kv-indexer-mongo
+MONGO_URI          := mongodb://127.0.0.1:27017
+MONGO_DB_VLLM      := kvindexer_local_vllm
+MONGO_DB_SGLANG    := kvindexer_local_sglang
 
 # Bearer token for the gateway↔kvindexer hop (crosses the network in prod). For
 # local dev a fixed dev token is fine; override with `make up AUTH_TOKEN=...`.
 # The gateway sends it (-backend-token); each kvindexer requires it (-auth-token).
 AUTH_TOKEN   := dev-local-token
 
-# Bind host for the control plane. 127.0.0.1 keeps everything off the public IP.
-BIND := 127.0.0.1
+# Bind hosts. Keep APIs loopback-only; expose the Next.js frontend so remote
+# browsers can use the UI while Next proxies /api/kvi to the local gateway.
+BIND     := 127.0.0.1
+WEB_BIND := 0.0.0.0
 
 # start-svc <name> <port> <logfile> -- <command...>
 # Skips if the port is already listening; otherwise launches detached, records a pid.
@@ -72,7 +83,7 @@ define start-svc
 	@if ss -ltn 2>/dev/null | grep -qP '127\.0\.0\.1:$(2)\b|0\.0\.0\.0:$(2)\b|\*:$(2)\b'; then \
 		echo "  [skip] $(1) already listening on :$(2)"; \
 	else \
-		echo "  [start] $(1) on $(BIND):$(2)  (log: $(3))"; \
+		echo "  [start] $(1) on $(if $(5),$(5),$(BIND)):$(2)  (log: $(3))"; \
 		setsid $(4) < /dev/null > $(3) 2>&1 & echo $$! > $(RUN)/$(1).pid; \
 		disown || true; \
 	fi
@@ -93,8 +104,9 @@ define stop-svc
 endef
 
 .PHONY: help build build-go build-web test \
-        up down restart status logs clean smoke \
+        up down restart status logs clean clean-mongo smoke \
         backend-vllm backend-sglang gateway frontend \
+        mongo stop-mongo mongo-status \
         stop-backend-vllm stop-backend-sglang stop-gateway stop-frontend \
         inference stop-inference inference-status
 
@@ -103,14 +115,15 @@ help:
 	@echo ""
 	@echo "  make inference   start vLLM + SGLang engines on the GPU (separate lifecycle)"
 	@echo "  make build       compile Go binaries + web production build"
-	@echo "  make up          start gateway + both kvindexer backends + frontend"
+	@echo "  make up          start MongoDB + gateway + both kvindexer backends + frontend"
 	@echo "  make down        stop the control plane (inference untouched)"
 	@echo "  make restart     down then up"
 	@echo "  make status      show listening ports + per-cluster health"
 	@echo "  make smoke       tokenize + query-prefix both clusters end-to-end"
 	@echo "  make logs        tail -f all control-plane logs"
 	@echo "  make test        go test ./..."
-	@echo "  make clean       down + remove run/ (drops the gateway connection DB → re-seed)"
+	@echo "  make clean       down + remove run/ (keeps MongoDB data)"
+	@echo "  make clean-mongo stop MongoDB and delete its Docker volume"
 
 # ---------- build ----------
 build: build-go build-web
@@ -124,8 +137,11 @@ build-go:
 build-web:
 	@echo "==> web production build (Node 20)"
 	@cd $(ROOT)/web && [ -d node_modules ] || PATH="$(NODE_BIN):$$PATH" $(NPM) install
-	@cd $(ROOT)/web && grep -q ':$(PORT_GW)' .env.local 2>/dev/null || \
-		echo 'NEXT_PUBLIC_API_BASE=http://127.0.0.1:$(PORT_GW)' > .env.local
+	@cd $(ROOT)/web && { \
+		grep -vE '^(NEXT_PUBLIC_API_BASE|KVI_API_BASE)=' .env.local 2>/dev/null || true; \
+		echo 'NEXT_PUBLIC_API_BASE=/api/kvi'; \
+		echo 'KVI_API_BASE=http://127.0.0.1:$(PORT_GW)'; \
+	} > .env.local.tmp && mv .env.local.tmp .env.local
 	cd $(ROOT)/web && PATH="$(NODE_BIN):$$PATH" $(NPM) run build
 
 test:
@@ -134,33 +150,82 @@ test:
 $(RUN):
 	@mkdir -p $(RUN)
 
+# ---------- MongoDB ----------
+mongo:
+	@if ! command -v docker >/dev/null 2>&1; then \
+		echo "  docker CLI not found; install/start Docker before running MongoDB"; \
+		exit 127; \
+	fi
+	@if $(DOCKER) ps --format '{{.Names}}' | grep -qx '$(MONGO_CONTAINER)'; then \
+		echo "  [skip] MongoDB already running ($(MONGO_CONTAINER))"; \
+	elif $(DOCKER) ps -a --format '{{.Names}}' | grep -qx '$(MONGO_CONTAINER)'; then \
+		echo "  [start] MongoDB container $(MONGO_CONTAINER)"; \
+		$(DOCKER) start $(MONGO_CONTAINER) >/dev/null; \
+	else \
+		echo "  [start] MongoDB $(MONGO_IMAGE) on 127.0.0.1:27017"; \
+		$(DOCKER) run -d --name $(MONGO_CONTAINER) \
+			-p 127.0.0.1:27017:27017 \
+			-v $(MONGO_VOLUME):/data/db \
+			$(MONGO_IMAGE) >/dev/null; \
+	fi
+	@for i in $$(seq 1 30); do \
+		if $(DOCKER) exec $(MONGO_CONTAINER) mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx '1'; then \
+			echo "  MongoDB ready"; exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "  MongoDB did not become ready"; exit 1
+
+stop-mongo:
+	@if ! command -v docker >/dev/null 2>&1; then \
+		echo "  [skip] MongoDB not available (docker CLI not found)"; \
+		exit 0; \
+	fi
+	@if $(DOCKER) ps --format '{{.Names}}' | grep -qx '$(MONGO_CONTAINER)'; then \
+		echo "  [stop] MongoDB $(MONGO_CONTAINER)"; \
+		$(DOCKER) stop $(MONGO_CONTAINER) >/dev/null; \
+	else \
+		echo "  [skip] MongoDB not running"; \
+	fi
+
+mongo-status:
+	@if ! command -v docker >/dev/null 2>&1; then \
+		echo "  MongoDB unavailable (docker CLI not found)"; \
+		exit 0; \
+	fi
+	@if $(DOCKER) ps --format '{{.Names}}' | grep -qx '$(MONGO_CONTAINER)'; then \
+		echo "  MongoDB $(MONGO_CONTAINER) running on 127.0.0.1:27017"; \
+	else \
+		echo "  MongoDB $(MONGO_CONTAINER) down"; \
+	fi
+
 # ---------- start individual services ----------
-# Each kvindexer is STATELESS: -store memory loads its one cluster from
-# config.local.yaml into memory every boot, and requires the bearer token.
+# Each kvindexer loads its own cluster bootstrap once, then MongoDB is
+# authoritative for frontend policy edits and persisted prefix-cache events.
 backend-vllm: $(KVINDEXER) | $(RUN)
-	$(call start-svc,backend-vllm,$(PORT_VLLM_KVI),$(RUN)/backend-vllm.log,$(KVINDEXER) -addr $(BIND):$(PORT_VLLM_KVI) -store memory -bootstrap $(CONFIG) -cluster $(CLUSTER_VLLM) -auth-token $(AUTH_TOKEN))
+	$(call start-svc,backend-vllm,$(PORT_VLLM_KVI),$(RUN)/backend-vllm.log,$(KVINDEXER) -addr $(BIND):$(PORT_VLLM_KVI) -store mongo -mongo-uri $(MONGO_URI) -mongo-db $(MONGO_DB_VLLM) -bootstrap $(CONFIG_VLLM) -cluster $(CLUSTER_VLLM) -auth-token $(AUTH_TOKEN))
 
 backend-sglang: $(KVINDEXER) | $(RUN)
-	$(call start-svc,backend-sglang,$(PORT_SGLANG_KVI),$(RUN)/backend-sglang.log,$(KVINDEXER) -addr $(BIND):$(PORT_SGLANG_KVI) -store memory -bootstrap $(CONFIG) -cluster $(CLUSTER_SGLANG) -auth-token $(AUTH_TOKEN))
+	$(call start-svc,backend-sglang,$(PORT_SGLANG_KVI),$(RUN)/backend-sglang.log,$(KVINDEXER) -addr $(BIND):$(PORT_SGLANG_KVI) -store mongo -mongo-uri $(MONGO_URI) -mongo-db $(MONGO_DB_SGLANG) -bootstrap $(CONFIG_SGLANG) -cluster $(CLUSTER_SGLANG) -auth-token $(AUTH_TOKEN))
 
 # The gateway OWNS the connection registry (SQLite), seeded once from config with
 # the shared bearer token; it attaches that token to every call to a kvindexer.
 gateway: $(KVGATEWAY)
-	$(call start-svc,gateway,$(PORT_GW),$(RUN)/gateway.log,$(KVGATEWAY) -addr $(BIND):$(PORT_GW) -sqlite-path $(GW_SQLITE) -config $(CONFIG) -backend-token $(AUTH_TOKEN))
+	$(call start-svc,gateway,$(PORT_GW),$(RUN)/gateway.log,$(KVGATEWAY) -addr $(BIND):$(PORT_GW) -sqlite-path $(GW_SQLITE) -configs $(GATEWAY_CONFIGS) -backend-token $(AUTH_TOKEN))
 
 frontend:
 	@[ -d $(ROOT)/web/.next ] || $(MAKE) build-web
-	$(call start-svc,frontend,$(PORT_WEB),$(RUN)/frontend.log,$(NPM) --prefix $(ROOT)/web run start -- -H $(BIND) -p $(PORT_WEB))
+	$(call start-svc,frontend,$(PORT_WEB),$(RUN)/frontend.log,$(NPM) --prefix $(ROOT)/web run start -- -H $(WEB_BIND) -p $(PORT_WEB),$(WEB_BIND))
 
 $(KVINDEXER) $(KVGATEWAY): build-go
 
 # ---------- up / down ----------
-# Order: backends first, then gateway (so its first health probe finds them), then frontend.
-up: backend-vllm backend-sglang gateway frontend
+# Order: Mongo first, then backends, then gateway (so its first health probe finds them), then frontend.
+up: mongo backend-vllm backend-sglang gateway frontend
 	@sleep 1
-	@echo "==> stack up.  frontend http://$(BIND):$(PORT_WEB)  gateway $(BIND):$(PORT_GW)"
+	@echo "==> stack up.  frontend http://$(WEB_BIND):$(PORT_WEB)  gateway $(BIND):$(PORT_GW)"
 
-down: stop-frontend stop-gateway stop-backend-sglang stop-backend-vllm
+down: stop-frontend stop-gateway stop-backend-sglang stop-backend-vllm stop-mongo
 	@echo "==> control plane stopped (inference left running)"
 
 restart: down up
@@ -207,6 +272,8 @@ status:
 	done
 	@echo "== inference (independent) =="
 	@$(MAKE) -s inference-status
+	@echo "== mongodb =="
+	@$(MAKE) -s mongo-status
 	@echo "== gateway clusters =="
 	@curl -s --max-time 3 http://127.0.0.1:$(PORT_GW)/clusters-health 2>/dev/null | python3 -c "import sys,json;[print('  ',c['cluster'],[(b['id'],b['healthy']) for b in c['backends']]) for c in json.load(sys.stdin)]" 2>/dev/null || echo "  (gateway not up)"
 
@@ -220,4 +287,9 @@ logs:
 
 clean: down
 	@rm -rf $(RUN)
-	@echo "==> removed $(RUN) (gateway connection DB dropped; kvindexers are stateless)"
+	@echo "==> removed $(RUN) (gateway connection DB dropped; MongoDB data kept)"
+
+clean-mongo: stop-mongo
+	@$(DOCKER) rm $(MONGO_CONTAINER) >/dev/null 2>&1 || true
+	@$(DOCKER) volume rm $(MONGO_VOLUME) >/dev/null 2>&1 || true
+	@echo "==> removed MongoDB container and volume"

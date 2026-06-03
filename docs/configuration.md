@@ -1,16 +1,15 @@
 # Configuration
 
-`ucloud-kv-indexer` is configured by **one nested YAML file** that describes the whole
-topology. Both binaries read the *same* file:
+`ucloud-kv-indexer` is configured by nested YAML bootstrap files. Local dev uses **one
+file per cluster** so each kvindexer has a small cluster-local bootstrap:
+[`deploy/local-vllm.yaml`](../deploy/local-vllm.yaml) and
+[`deploy/local-sglang.yaml`](../deploy/local-sglang.yaml).
 
-- **`kvgateway -config config.yaml`** builds its federated backend list from each
+- **`kvgateway -configs a.yaml,b.yaml`** builds its federated backend list from every
   cluster's `backends`.
-- **`kvindexer -bootstrap config.yaml -cluster <id>`** seeds its runtime store **once,
+- **`kvindexer -bootstrap local-vllm.yaml -cluster local-vllm`** seeds its runtime store **once,
   when empty**, scoped to one cluster. After that the **runtime store is authoritative**
   and the console mutates it (the file is never re-read unless you wipe the store).
-
-The local two-cluster example is [`deploy/config.local.yaml`](../deploy/config.local.yaml);
-a production multi-cluster example is [`deploy/config.yaml`](../deploy/config.yaml).
 
 ---
 
@@ -142,16 +141,16 @@ policies:
 
 ## Production layout (many clusters)
 
-See [`deploy/config.yaml`](../deploy/config.yaml) for three clusters (SGLang Qwen3 on H20,
-vLLM Qwen2.5 on H20, SGLang Qwen3.6 on H200), each with its own `backends` (the
-remote kvindexer URLs), engines, and models, plus cross-cluster policies. The deployment
-pattern (inverse topology — gateway holds state, kvindexers are stateless):
+For production, keep the same shape: one YAML per cluster or a small set of files grouped
+by ownership. Each file can contain its cluster's `backends` (the remote kvindexer URLs),
+engines, models, and the policies that should seed that kvindexer. The deployment pattern
+(gateway holds the connection registry; kvindexers own their cluster config store):
 
 - Run **one kvindexer per cluster**, next to that cluster's engines, each
-  `-bootstrap config.yaml -cluster <id> -store memory -auth-token <TOKEN>`. It loads only
-  its own cluster from the YAML into memory each boot and subscribes only to its local ZMQ
-  streams. No local database.
-- Run **one kvgateway** with `-sqlite-path connections.db -config config.yaml
+  `-bootstrap <cluster>.yaml -cluster <id> -store mongo -mongo-uri ... -mongo-db ... -auth-token <TOKEN>`.
+  It loads only its own cluster from YAML when the Mongo config snapshot is empty and
+  subscribes only to its local ZMQ streams.
+- Run **one kvgateway** with `-sqlite-path connections.db -configs cluster-a.yaml,cluster-b.yaml
   -backend-token <TOKEN>`. On first boot it seeds its connection registry from every
   cluster's `backends` (one row per URL, id `<cluster>-N`) and attaches the token on every
   hop. Thereafter the registry is authoritative and editable via `/admin/connections`. The
@@ -164,28 +163,32 @@ pattern (inverse topology — gateway holds state, kvindexers are stateless):
 
 ## Persistence & state ownership
 
-**The kvindexer is stateless by default.** State ownership is split:
+State ownership is split:
 
 | Component | Store | Holds | Flags |
 | --- | --- | --- | --- |
-| **kvindexer** | `memory` (default) | nothing — loads its 1 cluster from YAML each boot | `-store memory -bootstrap config.yaml -cluster <id>` |
+| **kvindexer** | `mongo` | dynamic config plus decoded `prefix_cache_events` | `-store mongo -mongo-uri ... -mongo-db ... -bootstrap <cluster>.yaml -cluster <id>` |
+| kvindexer | `memory` (default) | nothing — loads its 1 cluster from YAML each boot | `-store memory -bootstrap <cluster>.yaml -cluster <id>` |
 | kvindexer (standalone) | `sqlite` / `file` | the full config, persisted | `-store sqlite -sqlite-path …` |
-| **kvgateway** | `sqlite` | the connection registry: `{id, cluster, url, token, enabled}` | `-sqlite-path conns.db -config config.yaml -backend-token <TOKEN>` |
+| **kvgateway** | `sqlite` | the connection registry: `{id, cluster, url, token, enabled}` | `-sqlite-path conns.db -configs a.yaml,b.yaml -backend-token <TOKEN>` |
 
 kvindexer `-store` values:
 
 | Store | Flags | When |
 | --- | --- | --- |
-| **memory** (default) | `-bootstrap config.yaml -cluster <id>` | Stateless per-cluster worker behind the gateway. Loads YAML each boot. |
+| **mongo** | `-mongo-uri uri -mongo-db db` | Persistent policy/config store and prefix-cache event sink. |
+| **memory** (default) | `-bootstrap <cluster>.yaml -cluster <id>` | Stateless per-cluster worker behind the gateway. Loads YAML each boot. |
 | **sqlite** | `-sqlite-path path.db` | Standalone kvindexer (no gateway) that must persist console edits. Pure-Go (`modernc.org/sqlite`, Go ≥ 1.25). |
 | **file** | `-config data/config.json` | Single JSON snapshot; simplest, good for inspection. |
 
-**Seeding** (`-bootstrap config.yaml`, operator-authored) only applies when the store is
-still empty — which, for `memory`, is *every boot*.
+**Seeding** (`-bootstrap <cluster>.yaml`, operator-authored) only applies when the store is
+still empty — which, for `memory`, is *every boot* and for `mongo` means no active
+`config_snapshots` document yet.
 
 The gateway's connection registry uses the same **seed-once** rule: it seeds from
-`-config` only when the DB has no rows, then `/admin/connections` is authoritative. Drop
-the gateway DB (`make clean`, or delete the `-sqlite-path` file) to re-seed from YAML.
+`-config`/`-configs` only when the DB has no rows, then `/admin/connections` is
+authoritative. Drop the gateway DB (`make clean`, or delete the `-sqlite-path` file) to
+re-seed from YAML.
 
 The config has a **version** that bumps on every mutation; hash-affecting profile edits
 bump the profile version (and thus the namespace), which the console warns about.

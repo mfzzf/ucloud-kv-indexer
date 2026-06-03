@@ -29,6 +29,9 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/ucloud/kv-indexer/internal/openapi"
 )
 
 // Backend is one kvindexer instance, labelled with the cluster it serves.
@@ -194,7 +197,7 @@ func (g *Gateway) fanoutList(path string, postMerge func([]map[string]any)) http
 			wg.Add(1)
 			go func(i int, b Backend) {
 				defer wg.Done()
-				items, err := g.getList(b, path)
+				items, err := g.getList(b, path, r.URL.RawQuery)
 				if err != nil {
 					log.Printf("gateway: backend %s (%s) %s: %v", b.ID, b.Cluster, path, err)
 					return
@@ -219,8 +222,12 @@ func (g *Gateway) fanoutList(path string, postMerge func([]map[string]any)) http
 	}
 }
 
-func (g *Gateway) getList(b Backend, path string) ([]map[string]any, error) {
-	req, err := http.NewRequest(http.MethodGet, b.URL+path, nil)
+func (g *Gateway) getList(b Backend, path, rawQuery string) ([]map[string]any, error) {
+	target := b.URL + path
+	if rawQuery != "" {
+		target += "?" + rawQuery
+	}
+	req, err := http.NewRequest(http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +329,70 @@ func (g *Gateway) proxyOne(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBody)
 }
 
+// proxyStreamOne forwards a long-lived streaming GET (SSE) to exactly one
+// backend. The ordinary gateway client has a 30s timeout for JSON calls, so the
+// streaming path uses a no-timeout client and flushes each chunk as it arrives.
+func (g *Gateway) proxyStreamOne(w http.ResponseWriter, r *http.Request) {
+	backends := g.selected(r)
+	if len(backends) == 0 {
+		writeErr(w, http.StatusNotFound,
+			"no backend matches cluster/backend selector; pass ?cluster= or ?backend=")
+		return
+	}
+	if len(backends) > 1 {
+		ids := make([]string, len(backends))
+		for i, b := range backends {
+			ids[i] = b.ID
+		}
+		writeErr(w, http.StatusBadRequest,
+			fmt.Sprintf("ambiguous stream target (%d backends: %v); select one cluster/backend", len(backends), ids))
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	b := backends[0]
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, b.URL+r.URL.Path, nil)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	authorize(req, b)
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway,
+			fmt.Sprintf("backend %s (%s): %v", b.ID, b.Cluster, err))
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-KVI-Backend", b.ID)
+	w.Header().Set("X-KVI-Cluster", b.Cluster)
+	w.WriteHeader(resp.StatusCode)
+	flusher.Flush()
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, err := w.Write(buf[:n]); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
 func (g *Gateway) forward(b Backend, method, path string, body []byte) ([]byte, int, error) {
 	var rdr io.Reader
 	if body != nil {
@@ -359,55 +430,72 @@ func authorize(req *http.Request, b Backend) {
 
 // Router wires the federation endpoints + CORS.
 func (g *Gateway) Router() http.Handler {
-	mux := http.NewServeMux()
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
 
 	// Gateway-native.
-	mux.HandleFunc("GET /clusters-health", g.handleClustersHealth)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "backends": len(g.backends())})
+	r.GET("/clusters-health", httpHandler(g.handleClustersHealth))
+	r.GET("/healthz", func(c *gin.Context) {
+		writeJSON(c.Writer, http.StatusOK, map[string]any{"status": "ok", "backends": len(g.backends())})
+	})
+	r.GET("/openapi.json", func(c *gin.Context) {
+		c.JSON(http.StatusOK, openapi.GatewaySpec())
 	})
 
 	// Connection registry admin (only when SQLite-backed). These manage which
 	// kvindexers the gateway federates — the inverse-topology control surface.
 	if g.store != nil {
-		mux.HandleFunc("GET /admin/connections", g.handleListConnections)
-		mux.HandleFunc("POST /admin/connections", g.handleUpsertConnection)
-		mux.HandleFunc("DELETE /admin/connections/{id}", g.handleDeleteConnection)
+		r.GET("/admin/connections", httpHandler(g.handleListConnections))
+		r.POST("/admin/connections", httpHandler(g.handleUpsertConnection))
+		r.DELETE("/admin/connections/:id", httpHandler(g.handleDeleteConnection, "id"))
 	}
 
 	// Fan-out GET (array merge, cluster-tagged).
-	mux.HandleFunc("GET /clusters", g.fanoutList("/clusters", nil))
-	mux.HandleFunc("GET /engines", g.fanoutList("/engines", nil))
-	mux.HandleFunc("GET /model-profiles", g.fanoutList("/model-profiles", nil))
-	mux.HandleFunc("GET /policies", g.fanoutList("/policies", nil))
-	mux.HandleFunc("GET /event-streams", g.fanoutList("/event-streams", nil))
-	mux.HandleFunc("GET /index/stats", g.fanoutList("/index/stats", nil))
-	mux.HandleFunc("GET /decisions", g.fanoutList("/decisions", sortByTimestampAsc))
-	mux.HandleFunc("GET /config/audit-log", g.fanoutList("/config/audit-log", sortByVersionAsc))
+	r.GET("/clusters", httpHandler(g.fanoutList("/clusters", nil)))
+	r.GET("/engines", httpHandler(g.fanoutList("/engines", nil)))
+	r.GET("/model-profiles", httpHandler(g.fanoutList("/model-profiles", nil)))
+	r.GET("/policies", httpHandler(g.fanoutList("/policies", nil)))
+	r.GET("/event-streams", httpHandler(g.fanoutList("/event-streams", nil)))
+	r.GET("/kv-events/recent", httpHandler(g.fanoutList("/kv-events/recent", sortByObservedAtAsc)))
+	r.GET("/kv-events/stream", httpHandler(g.proxyStreamOne))
+	r.GET("/index/stats", httpHandler(g.fanoutList("/index/stats", nil)))
+	r.GET("/decisions", httpHandler(g.fanoutList("/decisions", sortByTimestampAsc)))
+	r.GET("/config/audit-log", httpHandler(g.fanoutList("/config/audit-log", sortByVersionAsc)))
 
 	// Aggregate object.
-	mux.HandleFunc("GET /config/versions", g.handleConfigVersions)
+	r.GET("/config/versions", httpHandler(g.handleConfigVersions))
 
 	// Single-backend writes (cluster/backend-targeted).
-	mux.HandleFunc("POST /clusters", g.proxyOne)
-	mux.HandleFunc("PATCH /clusters/{id}", g.proxyOne)
-	mux.HandleFunc("POST /engines/register", g.proxyOne)
-	mux.HandleFunc("POST /engines/unregister", g.proxyOne)
-	mux.HandleFunc("PATCH /engines/{id}", g.proxyOne)
-	mux.HandleFunc("POST /model-profiles", g.proxyOne)
-	mux.HandleFunc("POST /policies", g.proxyOne)
-	mux.HandleFunc("PATCH /policies/{id}", g.proxyOne)
+	r.POST("/clusters", httpHandler(g.proxyOne))
+	r.PATCH("/clusters/:id", httpHandler(g.proxyOne, "id"))
+	r.POST("/engines/register", httpHandler(g.proxyOne))
+	r.POST("/engines/unregister", httpHandler(g.proxyOne))
+	r.PATCH("/engines/:id", httpHandler(g.proxyOne, "id"))
+	r.POST("/model-profiles", httpHandler(g.proxyOne))
+	r.POST("/policies", httpHandler(g.proxyOne))
+	r.PATCH("/policies/:id", httpHandler(g.proxyOne, "id"))
+	r.DELETE("/policies/:id", httpHandler(g.proxyOne, "id"))
 
 	// Single-backend admission + query (cluster-targeted).
-	mux.HandleFunc("POST /route", g.proxyOne)
-	mux.HandleFunc("POST /v1/chat/completions", g.proxyOne)
-	mux.HandleFunc("POST /v1/responses", g.proxyOne)
-	mux.HandleFunc("POST /v1/messages", g.proxyOne)
-	mux.HandleFunc("POST /query-prefix", g.proxyOne)
-	mux.HandleFunc("POST /tokenize/preview", g.proxyOne)
-	mux.HandleFunc("POST /config/effective-policy/preview", g.proxyOne)
+	r.POST("/route", httpHandler(g.proxyOne))
+	r.POST("/v1/chat/completions", httpHandler(g.proxyOne))
+	r.POST("/v1/responses", httpHandler(g.proxyOne))
+	r.POST("/v1/messages", httpHandler(g.proxyOne))
+	r.POST("/query-prefix", httpHandler(g.proxyOne))
+	r.POST("/tokenize/preview", httpHandler(g.proxyOne))
+	r.POST("/config/effective-policy/preview", httpHandler(g.proxyOne))
 
-	return withCORS(mux)
+	return withCORS(r)
+}
+
+func httpHandler(h http.HandlerFunc, pathParams ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		for _, name := range pathParams {
+			c.Request.SetPathValue(name, c.Param(name))
+		}
+		h(c.Writer, c.Request)
+	}
 }
 
 // ---- connection registry admin ----
@@ -498,6 +586,12 @@ func (g *Gateway) handleDeleteConnection(w http.ResponseWriter, r *http.Request)
 func sortByTimestampAsc(items []map[string]any) {
 	sort.SliceStable(items, func(i, j int) bool {
 		return asString(items[i]["timestamp"]) < asString(items[j]["timestamp"])
+	})
+}
+
+func sortByObservedAtAsc(items []map[string]any) {
+	sort.SliceStable(items, func(i, j int) bool {
+		return asString(items[i]["observed_at"]) < asString(items[j]["observed_at"])
 	})
 }
 

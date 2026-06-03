@@ -18,7 +18,7 @@
 #
 # qwen3-0.6b is a standard dense-attention Qwen3 (not hybrid), so SGLang uses a
 # normal paged KV cache. --page-size 64 fixes the KV-event block size to 64,
-# which the kvindexer's sglang-v1-text profile must match (deploy/config.local.yaml).
+# which the kvindexer's sglang-v1-text profile must match (deploy/local-sglang.yaml).
 # A small model deliberately co-resides with the 4B vLLM engine on one 24GB GPU.
 set -euo pipefail
 

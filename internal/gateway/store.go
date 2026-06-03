@@ -15,7 +15,7 @@ import (
 //
 // This is the inverse of the old topology: the GATEWAY now owns the connection
 // registry (which kvindexers exist, where, and with what credential), while each
-// kvindexer is stateless and loads only its own single-cluster config.yaml. The
+// kvindexer loads only its own single-cluster bootstrap YAML. The
 // gateway↔kvindexer hop crosses the (public) network, so each connection carries
 // a bearer Token the gateway attaches to every forwarded request.
 type Connection struct {

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   IconActivity,
+  IconApi,
   IconBox,
   IconDashboard,
   IconDatabase,
@@ -53,6 +54,7 @@ const observability: NavLink[] = [
 
 const tools: NavLink[] = [
   { href: "/simulator", labelKey: "nav.simulator", icon: IconFlask },
+  { href: "/api-docs", labelKey: "nav.api_docs", icon: IconApi },
 ];
 
 function isActive(path: string, href: string) {
@@ -141,24 +143,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           pathname={pathname}
           t={t}
         />
-        <SidebarGroup className="mt-auto">
-          <SidebarGroupContent>
-            <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild>
-                  <a
-                    href="https://github.com/anthropics/claude-code"
-                    rel="noopener noreferrer"
-                    target="_blank"
-                  >
-                    <IconSettings />
-                    <span>{t("app.brand.subtitle")}</span>
-                  </a>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
         <NavUser

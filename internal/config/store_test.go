@@ -49,6 +49,24 @@ func TestEffectivePolicyScopeFiltering(t *testing.T) {
 	}
 }
 
+func TestRemovePolicy(t *testing.T) {
+	s := NewStore("", nil)
+	s.UpsertPolicy(Policy{PolicyID: "p1", Scope: Scope{ModelID: "qwen"}, Enabled: ptrB(false)})
+	if !s.RemovePolicy("p1") {
+		t.Fatal("expected existing policy to be removed")
+	}
+	if s.RemovePolicy("p1") {
+		t.Fatal("expected missing policy remove to return false")
+	}
+	if ps := s.ListPolicies(); len(ps) != 0 {
+		t.Fatalf("policy not removed: %+v", ps)
+	}
+	audit := s.Audit()
+	if got := audit[len(audit)-1]; got.Action != "remove" || got.Entity != "policy" || got.EntityID != "p1" {
+		t.Fatalf("remove audit missing: %+v", got)
+	}
+}
+
 func TestModelProfileVersionBump(t *testing.T) {
 	s := NewStore("", nil)
 	p := s.UpsertModelProfile(ModelProfile{ModelID: "qwen", HashProfile: "vllm-v1-text", BlockSize: 16})

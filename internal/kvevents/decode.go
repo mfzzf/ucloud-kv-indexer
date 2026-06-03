@@ -34,17 +34,24 @@ const (
 
 // Event is the decoded, framework-neutral KV event.
 type Event struct {
-	Kind         EventKind
-	BlockHashes  []uint64
-	ParentHash   uint64
-	HasParent    bool
-	TokenIDs     []int32
-	BlockSize    int
-	Medium       string // GPU/CPU/DISK (as reported); lowercased by ingest
-	LoraName     string
-	GroupIdx     int
-	SpecKind     string
-	HasExtraKeys bool // true if any non-nil extra_keys present (feature flag)
+	Kind              EventKind
+	BlockHashes       []uint64
+	ParentHash        uint64
+	HasParent         bool
+	TokenIDs          []int32
+	HasNestedTokenIDs bool
+	BlockSize         int
+	Medium            string // GPU/CPU/DISK (as reported); lowercased by ingest
+	LoraID            int
+	HasLoraID         bool
+	LoraName          string
+	ExtraKeys         []string
+	ExtraKeyCount     int
+	GroupIdx          int
+	SpecKind          string
+	SlidingWindow     int
+	HasSlidingWindow  bool
+	HasExtraKeys      bool // true if any non-nil extra_keys present (feature flag)
 }
 
 // Batch is a decoded event batch with its sequence number and DP rank.
@@ -102,17 +109,27 @@ func toInt(v any) (int, bool) {
 }
 
 func toInt32Slice(v any) []int32 {
+	out, _ := toInt32SliceInfo(v)
+	return out
+}
+
+func toInt32SliceInfo(v any) ([]int32, bool) {
 	arr, ok := v.([]any)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	out := make([]int32, 0, len(arr))
+	nested := false
 	for _, e := range arr {
 		if i, ok := toInt(e); ok {
 			out = append(out, int32(i))
+			continue
+		}
+		if _, ok := e.([]any); ok {
+			nested = true
 		}
 	}
-	return out
+	return out, nested
 }
 
 func toUint64Slice(v any) []uint64 {
@@ -185,9 +202,15 @@ func decodeEvent(kind EventKind, fields []any) (Event, bool) {
 				ev.HasParent = true
 			}
 		}
-		ev.TokenIDs = toInt32Slice(fieldAt(fields, 3))
+		ev.TokenIDs, ev.HasNestedTokenIDs = toInt32SliceInfo(fieldAt(fields, 3))
 		if bs, ok := toInt(fieldAt(fields, 4)); ok {
 			ev.BlockSize = bs
+		}
+		if li := fieldAt(fields, 5); li != nil {
+			if id, ok := toInt(li); ok {
+				ev.LoraID = id
+				ev.HasLoraID = true
+			}
 		}
 		if m, ok := fieldAt(fields, 6).(string); ok {
 			ev.Medium = m
@@ -196,11 +219,16 @@ func decodeEvent(kind EventKind, fields []any) (Event, bool) {
 			ev.LoraName = ln
 		}
 		ev.HasExtraKeys = hasNonNilExtraKeys(fieldAt(fields, 8))
+		ev.ExtraKeys, ev.ExtraKeyCount = extraKeyStrings(fieldAt(fields, 8))
 		if gi, ok := toInt(fieldAt(fields, 9)); ok {
 			ev.GroupIdx = gi
 		}
 		if sk, ok := fieldAt(fields, 10).(string); ok {
 			ev.SpecKind = sk
+		}
+		if sw, ok := toInt(fieldAt(fields, 11)); ok {
+			ev.SlidingWindow = sw
+			ev.HasSlidingWindow = true
 		}
 		return ev, true
 	case KindBlockRemoved:
@@ -237,4 +265,23 @@ func hasNonNilExtraKeys(v any) bool {
 		}
 	}
 	return false
+}
+
+func extraKeyStrings(v any) ([]string, int) {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, 0
+	}
+	out := make([]string, 0, len(arr))
+	count := 0
+	for _, e := range arr {
+		if e == nil {
+			continue
+		}
+		count++
+		if len(out) < 16 {
+			out = append(out, fmt.Sprint(e))
+		}
+	}
+	return out, count
 }

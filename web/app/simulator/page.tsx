@@ -1,10 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Play, Wand2 } from "lucide-react";
 import {
   api,
+  ModelProfile,
   QueryPrefixResponse,
   RouteResponse,
   TokenizePreview,
@@ -47,6 +48,15 @@ export default function SimulatorPage() {
   // In federation mode "all" is ambiguous — require picking a cluster first.
   const needsCluster = multiCluster && cluster === "all";
   const [model, setModel] = React.useState("qwen3.5-4b");
+  const profiles = useQuery({
+    queryKey: ["profiles", cluster],
+    queryFn: () => api.get<ModelProfile[]>(clusterQ("/model-profiles", cluster)),
+    enabled: !needsCluster,
+  });
+  const profileIDs = React.useMemo(
+    () => [...new Set((profiles.data ?? []).map((p) => p.model_id))].sort(),
+    [profiles.data],
+  );
   const [proto, setProto] = React.useState("openai.chat");
   const [text, setText] = React.useState(
     "In a distant kingdom, the council debated trade routes. ".repeat(20),
@@ -55,6 +65,17 @@ export default function SimulatorPage() {
   const [hits, setHits] = React.useState<QueryPrefixResponse | null>(null);
   const [route, setRoute] = React.useState<RouteResponse | null>(null);
   const [err, setErr] = React.useState("");
+
+  React.useEffect(() => {
+    if (profileIDs.length === 0) return;
+    if (!profileIDs.includes(model)) {
+      setModel(profileIDs[0]);
+      setTok(null);
+      setHits(null);
+      setRoute(null);
+      setErr("");
+    }
+  }, [profileIDs, model]);
 
   function buildRaw() {
     if (proto === "anthropic.messages")
@@ -132,10 +153,25 @@ export default function SimulatorPage() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>{t("sim.field.model")}</Label>
-                <Input
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                />
+                {profileIDs.length > 0 ? (
+                  <Select value={model} onValueChange={setModel}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {profileIDs.map((id) => (
+                        <SelectItem key={id} value={id}>
+                          {id}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                  />
+                )}
               </div>
               <div className="space-y-2">
                 <Label>{t("sim.field.protocol")}</Label>

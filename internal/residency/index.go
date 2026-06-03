@@ -145,6 +145,47 @@ func (ix *Index) StoreEvent(engineID string, dpRank int, tier string, engineKeys
 	}
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
+	ix.storeRequestKeysLocked(engineID, dpRank, tier, requestKeys)
+
+	// Bridge engine keys to request keys, tail-aligned from the end of BOTH
+	// lists so the final block of each always pairs together.
+	nEng, nReq := len(engineKeys), len(requestKeys)
+	k := nEng
+	if nReq < k {
+		k = nReq
+	}
+	for i := 0; i < k; i++ {
+		ek := engineKeys[nEng-k+i]
+		rk := requestKeys[nReq-k+i]
+		ix.bridge[engineBridgeKey{engineID, ek}] = rk
+	}
+}
+
+// StoreEventByEngineKeys records a BlockStored event that does not carry
+// token_ids, as vLLM lower-tier/offload connectors do. It resolves each engine
+// key through the existing bridge learned from the original GPU store event,
+// then adds residency for the requested tier. If any key is unknown, nothing is
+// mutated and ok=false is returned.
+func (ix *Index) StoreEventByEngineKeys(engineID string, dpRank int, tier string, engineKeys []EngineKey) ([]RequestKey, bool) {
+	if len(engineKeys) == 0 {
+		return nil, false
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+
+	requestKeys := make([]RequestKey, 0, len(engineKeys))
+	for _, ek := range engineKeys {
+		rk, ok := ix.bridge[engineBridgeKey{engineID, ek}]
+		if !ok {
+			return nil, false
+		}
+		requestKeys = append(requestKeys, rk)
+	}
+	ix.storeRequestKeysLocked(engineID, dpRank, tier, requestKeys)
+	return requestKeys, true
+}
+
+func (ix *Index) storeRequestKeysLocked(engineID string, dpRank int, tier string, requestKeys []RequestKey) {
 	ts := ix.now().UnixNano()
 	r := resident{engineID: engineID, dpRank: dpRank, tier: tier}
 
@@ -163,19 +204,6 @@ func (ix *Index) StoreEvent(engineID string, dpRank int, tier string, engineKeys
 		e.holders[r] = ts
 		eng[rk] = struct{}{}
 	}
-
-	// Bridge engine keys to request keys, tail-aligned from the end of BOTH
-	// lists so the final block of each always pairs together.
-	nEng, nReq := len(engineKeys), len(requestKeys)
-	k := nEng
-	if nReq < k {
-		k = nReq
-	}
-	for i := 0; i < k; i++ {
-		ek := engineKeys[nEng-k+i]
-		rk := requestKeys[nReq-k+i]
-		ix.bridge[engineBridgeKey{engineID, ek}] = rk
-	}
 }
 
 // RemoveEvent processes a BlockRemoved: resolve engine keys via the bridge and
@@ -190,17 +218,36 @@ func (ix *Index) RemoveEvent(engineID string, dpRank int, tier string, engineKey
 		if !ok {
 			continue
 		}
-		delete(ix.bridge, bk)
 		if e := ix.byRequestKey[rk]; e != nil {
 			delete(e.holders, r)
 			if len(e.holders) == 0 {
 				delete(ix.byRequestKey, rk)
+				delete(ix.bridge, bk)
+			} else if !e.hasEngine(engineID) {
+				delete(ix.bridge, bk)
+				if eng := ix.byEngine[engineID]; eng != nil {
+					delete(eng, rk)
+				}
 			}
 		}
-		if eng := ix.byEngine[engineID]; eng != nil {
-			delete(eng, rk)
+		if e := ix.byRequestKey[rk]; e == nil || !e.hasEngine(engineID) {
+			if eng := ix.byEngine[engineID]; eng != nil {
+				delete(eng, rk)
+			}
 		}
 	}
+}
+
+func (e *residencyEntry) hasEngine(engineID string) bool {
+	if e == nil {
+		return false
+	}
+	for res := range e.holders {
+		if res.engineID == engineID {
+			return true
+		}
+	}
+	return false
 }
 
 // ClearEngine drops all residency contributed by an engine (AllBlocksCleared).

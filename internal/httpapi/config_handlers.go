@@ -237,6 +237,15 @@ func (s *Service) handlePatchPolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config_version": s.Store.Version()})
 }
 
+func (s *Service) handleDeletePolicy(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.Store.RemovePolicy(id) {
+		writeErr(w, http.StatusNotFound, "policy not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config_version": s.Store.Version()})
+}
+
 // ---- Observability ----
 
 func (s *Service) handleEventStreams(w http.ResponseWriter, r *http.Request) {

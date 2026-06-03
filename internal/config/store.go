@@ -277,6 +277,18 @@ func (s *Store) UpsertPolicy(p Policy) {
 	s.persistLocked()
 }
 
+func (s *Store) RemovePolicy(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.policies[id]; !ok {
+		return false
+	}
+	delete(s.policies, id)
+	s.bump(AuditEntry{Action: "remove", Entity: "policy", EntityID: id})
+	s.persistLocked()
+	return true
+}
+
 func (s *Store) ListPolicies() []Policy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

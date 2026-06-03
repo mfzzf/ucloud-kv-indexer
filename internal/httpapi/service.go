@@ -6,6 +6,8 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,6 +22,8 @@ type Service struct {
 	Store     *config.Store
 	Index     *residency.Manager
 	Tokenizer *tokenizer.Client
+	EventSink kvevents.EventSink
+	EventLog  KVEventLog
 	now       func() time.Time
 
 	// AuthToken, when non-empty, requires every request (except /healthz) to
@@ -36,6 +40,19 @@ type Service struct {
 	decMu     sync.Mutex
 	decisions []RouteRecord
 	decCap    int
+
+	// KV-event ring buffer + live subscribers for the Streams page. This sits
+	// behind RecordKVEvent, so every decoded ZMQ event can be shown live while
+	// still being forwarded to the configured durable sink (Mongo in local dev).
+	kvMu     sync.Mutex
+	kvEvents []kvevents.KVEventRecord
+	kvCap    int
+	kvSubs   map[chan kvevents.KVEventRecord]struct{}
+}
+
+// KVEventLog can provide persisted decoded KV events for /kv-events/recent.
+type KVEventLog interface {
+	RecentKVEvents(context.Context, int) ([]kvevents.KVEventRecord, error)
 }
 
 // NewService constructs a Service.
@@ -48,6 +65,88 @@ func NewService(store *config.Store, idx *residency.Manager, tok *tokenizer.Clie
 		Store: store, Index: idx, Tokenizer: tok, now: nowFn,
 		listeners: map[string]*kvevents.Listener{},
 		ctx:       ctx, cancel: cancel, decCap: 200,
+		kvCap: 200, kvSubs: map[chan kvevents.KVEventRecord]struct{}{},
+	}
+}
+
+// RecordKVEvent implements kvevents.EventSink. It fans a decoded event to the
+// durable sink (if configured), keeps a small in-memory recent buffer, and
+// notifies live SSE subscribers without blocking the ZMQ ingest path.
+func (s *Service) RecordKVEvent(rec kvevents.KVEventRecord) {
+	if s.EventSink != nil {
+		s.EventSink.RecordKVEvent(rec)
+	}
+
+	s.kvMu.Lock()
+	s.kvEvents = append(s.kvEvents, rec)
+	if len(s.kvEvents) > s.kvCap {
+		s.kvEvents = s.kvEvents[len(s.kvEvents)-s.kvCap:]
+	}
+	for ch := range s.kvSubs {
+		select {
+		case ch <- rec:
+		default:
+		}
+	}
+	s.kvMu.Unlock()
+}
+
+// RecentKVEvents returns the most recent decoded KV events, oldest first. When
+// a durable event log is configured, it is merged with the in-memory live ring
+// so restarts do not make the Streams page look empty.
+func (s *Service) RecentKVEvents(ctx context.Context, limit int) []kvevents.KVEventRecord {
+	if limit <= 0 || limit > s.kvCap {
+		limit = s.kvCap
+	}
+	var events []kvevents.KVEventRecord
+	if s.EventLog != nil {
+		if persisted, err := s.EventLog.RecentKVEvents(ctx, limit); err == nil {
+			events = append(events, persisted...)
+		}
+	}
+	s.kvMu.Lock()
+	start := len(s.kvEvents) - limit
+	if start < 0 {
+		start = 0
+	}
+	events = append(events, s.kvEvents[start:]...)
+	s.kvMu.Unlock()
+
+	seen := map[string]struct{}{}
+	out := make([]kvevents.KVEventRecord, 0, len(events))
+	for _, ev := range events {
+		k := kvEventKey(ev)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, ev)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ObservedAt.Before(out[j].ObservedAt)
+	})
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out
+}
+
+func kvEventKey(ev kvevents.KVEventRecord) string {
+	return fmt.Sprintf("%s/%s/%s/%s/%d", ev.EngineID, ev.Seq, ev.Kind, ev.ObservedAt.Format(time.RFC3339Nano), ev.GroupIdx)
+}
+
+// SubscribeKVEvents registers a live KV-event subscriber. Slow subscribers drop
+// events rather than backpressuring ZMQ ingest.
+func (s *Service) SubscribeKVEvents() (<-chan kvevents.KVEventRecord, func()) {
+	ch := make(chan kvevents.KVEventRecord, 256)
+	s.kvMu.Lock()
+	s.kvSubs[ch] = struct{}{}
+	s.kvMu.Unlock()
+	return ch, func() {
+		s.kvMu.Lock()
+		delete(s.kvSubs, ch)
+		close(ch)
+		s.kvMu.Unlock()
 	}
 }
 
@@ -93,7 +192,8 @@ func (s *Service) SyncListeners() {
 		if len(e.ServedModels) > 0 {
 			model = e.ServedModels[0]
 		}
-		l := kvevents.NewListener(e.EngineID, model, e.KVEventEndpoint, e.Topic, s, s.now)
+		l := kvevents.NewListener(e.EngineID, model, e.KVEventEndpoint, e.Topic, s, s.now, s)
+		l.SetReplayEndpoint(e.ReplayEndpoint)
 		l.Start(s.ctx)
 		s.listeners[id] = l
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 // Bootstrap is the human-authored seed configuration. It is the single
-// config.yaml that describes the WHOLE topology: every cluster (each with the
+// YAML that describes topology: every cluster (each with the
 // gateway backend URL(s) that front its kvindexer), every engine, model
 // profile, and policy.
 //

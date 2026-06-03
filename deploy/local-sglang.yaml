@@ -1,0 +1,33 @@
+# Local SGLang cluster config. This file is loaded only by the local-sglang
+# kvindexer; the gateway reads it only to discover this cluster's backend URL.
+clusters:
+  - cluster_id: local-sglang
+    display_name: Local · SGLang · Qwen3-0.6B
+    region: localhost
+    environment: dev
+    enabled: true
+    framework: sglang
+    backends: [http://127.0.0.1:8091]
+    models:
+      - model_id: qwen3-0.6b
+        block_size: 64
+        hash_seed: "0"
+        tokenizer_endpoint: http://127.0.0.1:30000
+    engines:
+      - engine_id: sglang-local-0
+        api_endpoint: http://127.0.0.1:30000
+        tokenizer_endpoint: http://127.0.0.1:30000
+        kv_event_endpoint: tcp://127.0.0.1:5557
+        replay_endpoint: tcp://127.0.0.1:5558
+        topic: kv-events
+        served_models: [qwen3-0.6b]
+        dp_ranks: 1
+        max_model_len: 8192
+
+policies:
+  - policy_id: local-default
+    long_prompt_threshold_tokens: 256
+    hard_long_prompt_threshold_tokens: 7168
+    min_hit_ratio_for_long_prompt: 0.5
+    event_freshness_ttl_ms: 5000
+    enabled: true

@@ -1,7 +1,8 @@
-// API client for the ucloud-kv-indexer Go backend. The base URL is configured
-// via NEXT_PUBLIC_API_BASE (defaults to the local backend on :8090).
+// API client for the ucloud-kv-indexer Go backend. By default browser requests
+// stay same-origin and Next.js proxies them to the gateway. Set
+// NEXT_PUBLIC_API_BASE only when the browser can directly reach the gateway.
 export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8090";
+  process.env.NEXT_PUBLIC_API_BASE || "/api/kvi";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -26,6 +27,7 @@ export const api = {
     req<T>(p, { method: "POST", body: JSON.stringify(body) }),
   patch: <T>(p: string, body: unknown) =>
     req<T>(p, { method: "PATCH", body: JSON.stringify(body) }),
+  del: <T>(p: string) => req<T>(p, { method: "DELETE" }),
   raw: req,
 };
 
@@ -136,6 +138,7 @@ export interface EffectivePolicy {
 export interface StreamHealth {
   engine_id: string;
   endpoint: string;
+  replay_endpoint?: string;
   topic: string;
   connected: boolean;
   last_seq: number;
@@ -152,6 +155,36 @@ export interface StreamHealth {
   queue_depth?: number;
   queue_cap?: number;
   last_error?: string;
+  _cluster?: string;
+  _backend?: string;
+}
+
+export interface KVEventRecord {
+  observed_at: string;
+  engine_id: string;
+  model: string;
+  namespace?: string;
+  seq: string;
+  batch_ts?: number;
+  dp_rank: number;
+  kind: string;
+  block_hashes?: string[];
+  parent_hash?: string;
+  token_ids?: number[];
+  nested_token_ids?: boolean;
+  block_size?: number;
+  medium?: string;
+  tier?: string;
+  lora_id?: number;
+  lora_name?: string;
+  extra_keys?: string[];
+  extra_key_count?: number;
+  group_idx?: number;
+  spec_kind?: string;
+  sliding_window?: number;
+  request_keys?: string[];
+  indexed: boolean;
+  skip_reason?: string;
   _cluster?: string;
   _backend?: string;
 }
