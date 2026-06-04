@@ -202,16 +202,20 @@ const en: Dict = {
   // policies
   "policies.title": "Admission Policies",
   "policies.subtitle":
-    "Control when long prompts must reuse existing KV cache, and how strict the hit-rate gate should be.",
+    "Priority rules for cache-aware admission. Conditions inside one rule are AND; rules are matched by priority.",
   "policies.btn.new": "New rule",
+  "policies.btn.test": "Test rule",
   "policies.sheet.title": "New rule",
   "policies.sheet.edit": "Edit rule: {id}",
   "policies.confirm.delete": "Delete rule {id}?",
   "policies.sheet.desc":
-    "Set where this rule applies and what KV-cache hit rate is required. Empty model, tenant, or cluster fields match all.",
+    "Build one admission rule from AND conditions, then choose the action to run when it matches.",
+  "policies.test.title": "Test rule matching",
+  "policies.test.desc":
+    "Simulate a request shape, match rules by priority, and inspect the first rule that wins.",
   "policies.list.title": "Policy rules",
-  "policies.list.desc": "Rules are merged by specificity: global, cluster, model, then tenant.",
-  "policies.list.empty": "No policy rules. Built-in defaults apply.",
+  "policies.list.desc": "Rules are evaluated by priority. The first enabled rule whose conditions all match wins.",
+  "policies.list.empty": "No policy rules. Requests are accepted when no rule matches.",
   "policies.col.policy": "Rule ID",
   "policies.col.scope": "Applies to",
   "policies.col.long": "Check after",
@@ -219,9 +223,14 @@ const en: Dict = {
   "policies.col.minhit": "Required hit",
   "policies.col.ttl": "Event age",
   "policies.col.enabled": "Status",
-  "policies.preview.title": "Policy preview",
+  "policies.col.priority": "Priority",
+  "policies.col.name": "Name",
+  "policies.col.conditions": "Conditions",
+  "policies.col.action": "Action",
+  "policies.col.uncertain": "Uncertain",
+  "policies.preview.title": "Rule preview",
   "policies.preview.desc":
-    "See the final rule for a model, tenant, and cluster before saving.",
+    "Test which rule would match a request shape before sending traffic.",
   "policies.preview.btn": "Preview",
   "policies.preview.merge": "applied rules",
   "policies.preview.long": "Check-after threshold",
@@ -231,8 +240,14 @@ const en: Dict = {
   "policies.preview.stale": "Stale-stream behavior",
   "policies.preview.weights": "GPU / CPU / disk weights",
   "policies.preview.enabled": "Final status",
+  "policies.preview.matched": "Matched rule",
+  "policies.preview.no_match": "No matching rule",
+  "policies.preview.evaluated": "Evaluated",
   "policies.field.id": "Rule ID",
   "policies.field.id_ph": "tenant-a-qwen",
+  "policies.field.name": "Display name",
+  "policies.field.name_ph": "256+ tokens require KV hit",
+  "policies.field.priority": "Priority",
   "policies.field.scope_model": "Model match",
   "policies.field.scope_tenant": "Tenant match",
   "policies.field.scope_cluster": "Cluster match",
@@ -242,11 +257,22 @@ const en: Dict = {
   "policies.field.ph_any": "All",
   "policies.field.long": "Start checking after tokens",
   "policies.field.hard": "Reject immediately above tokens",
+  "policies.field.input_tokens": "Input tokens",
+  "policies.field.preview_hit_ratio": "Assumed KV hit rate",
+  "policies.field.action": "Matched action",
+  "policies.field.low_hit": "Low-hit outcome",
+  "policies.field.uncertain": "Uncertain-signal outcome",
+  "policies.field.reject_status": "Reject HTTP status",
   "policies.field.minhit": "Required KV hit rate",
   "policies.field.ttl": "KV event max age (ms)",
   "policies.btn.save": "Save rule",
+  "policies.btn.add_condition": "Add condition",
   "policies.help.rule_id":
-    "A stable name for this rule. It is used in audit records and effective-policy merge traces.",
+    "A stable id for this rule. It is used in audit records, API responses, and update/delete paths.",
+  "policies.help.name":
+    "A readable label for operators. If empty, the rule id is shown.",
+  "policies.help.priority":
+    "Higher priority rules run first. Once a rule matches, lower-priority rules are not evaluated.",
   "policies.help.cluster":
     "The kv-indexer cluster this rule applies to, for example local-vllm or local-sglang. Empty means all clusters handled by this backend.",
   "policies.help.scope":
@@ -264,7 +290,7 @@ const en: Dict = {
   "policies.help.event_age":
     "Maximum age of KV-cache events before the listener is treated as stale. Stale streams avoid strict rejection because residency data may be incomplete.",
   "policies.help.status":
-    "Disabled rules are ignored; matching falls back to less specific rules and then built-in defaults.",
+    "Disabled rules are ignored. If no enabled rule matches, the request is accepted.",
   "policies.help.enabled":
     "Turn this rule on or off without deleting it.",
   "policies.help.stale_behavior":
@@ -273,6 +299,64 @@ const en: Dict = {
     "Relative credit assigned to KV hits found on GPU, CPU, and disk tiers. Higher weight means that tier contributes more to the hit score.",
   "policies.help.applied_rules":
     "Rules that were merged to produce the final policy, ordered from broader defaults to more specific matches.",
+  "policies.help.conditions":
+    "Every condition in one rule must be true. Leave the list empty to match every request.",
+  "policies.help.action":
+    "The operation to run after a rule matches: accept, reject, or require a minimum KV hit rate.",
+  "policies.help.input_tokens":
+    "Request prompt length after tokenization. This is the common field for starting cache-hit checks at a token threshold.",
+  "policies.help.preview_hit_ratio":
+    "Synthetic hit ratio used only by this preview. Real admission still queries the live prefix index.",
+  "policies.help.low_hit":
+    "What to do when the KV hit ratio is below the required threshold.",
+  "policies.help.uncertain":
+    "What to do when the cache signal cannot be trusted, for example tokenizer failure, unsupported hash features, no serving engine, or an unhealthy KV event stream.",
+  "policies.help.reject_status":
+    "HTTP status returned when the rule rejects. 429 is recommended for admission backpressure.",
+  "policies.help.matched_rule":
+    "The first enabled rule whose AND conditions all matched this preview request.",
+  "policies.help.result_reason":
+    "Backend reason code explaining why the preview accepted, rejected, or fell back.",
+  "policies.help.evaluated_rules":
+    "Rules considered in priority order until the first match.",
+  "policies.form.conditions": "Match conditions",
+  "policies.form.conditions_desc":
+    "Checked conditions are combined with AND. Separate rules are OR by priority.",
+  "policies.form.action": "Action",
+  "policies.conditions.all": "all requests",
+  "policies.conditions.all_desc":
+    "No conditions means this rule matches every request.",
+  "policies.condition.field": "Field",
+  "policies.condition.op": "Operator",
+  "policies.condition.value": "Value",
+  "policies.placeholder.list": "value1, value2",
+  "policies.condition.field.cluster_id": "cluster",
+  "policies.condition.field.model_id": "model",
+  "policies.condition.field.tenant_id": "tenant",
+  "policies.condition.field.input_tokens": "input tokens",
+  "policies.condition.field.hit_ratio": "hit ratio",
+  "policies.condition.field.best_hit_tokens": "best hit tokens",
+  "policies.condition.field.effective_cached_tokens": "effective cached tokens",
+  "policies.condition.field.kv_event_state": "KV event state",
+  "policies.condition.field.tokenized": "tokenized",
+  "policies.condition.field.hash_supported": "hash supported",
+  "policies.condition.field.has_candidates": "has candidates",
+  "policies.condition.op.eq": "=",
+  "policies.condition.op.neq": "!=",
+  "policies.condition.op.in": "in",
+  "policies.condition.op.not_in": "not in",
+  "policies.condition.op.gt": ">",
+  "policies.condition.op.gte": ">=",
+  "policies.condition.op.lt": "<",
+  "policies.condition.op.lte": "<=",
+  "policies.condition.op.contains": "contains",
+  "policies.action.accept": "Accept",
+  "policies.action.reject": "Reject",
+  "policies.action.require_cache_hit": "Require KV hit",
+  "policies.action.require_hit": "Require KV hit",
+  "policies.outcome.accept": "Accept",
+  "policies.outcome.reject": "Reject",
+  "policies.outcome.fallback_accept": "Fallback accept",
 
   // streams
   "streams.title": "KV Event Streams",
@@ -391,7 +475,7 @@ const en: Dict = {
   "sim.dec.fallback": "fallback",
   "sim.dec.target": "suggested target:",
   "sim.dec.min": "min required ratio: {min} · got {got}%",
-  "sim.dec.profile": "profile v{p} · config #{c} · policies: {ids}",
+  "sim.dec.profile": "profile v{p} · config #{c} · rule: {ids}",
 
   // protocols
   "protocol.openai.chat": "OpenAI Chat",
@@ -589,16 +673,20 @@ const zh: Dict = {
   // policies
   "policies.title": "准入与命中策略",
   "policies.subtitle":
-    "配置长请求什么时候必须命中已有 KV Cache，以及命中率不够时如何拦截。",
+    "按优先级配置准入规则。单条规则内条件是 AND，规则之间按优先级命中第一条。",
   "policies.btn.new": "新建规则",
+  "policies.btn.test": "测试规则",
   "policies.sheet.title": "新建策略规则",
   "policies.sheet.edit": "编辑策略：{id}",
   "policies.confirm.delete": "删除策略 {id}？",
   "policies.sheet.desc":
-    "设置这条规则适用于哪些请求，以及最低 KV 命中要求。模型、租户或集群留空表示全部适用。",
+    "用 AND 条件描述要匹配的请求，再设置命中后执行的动作。",
+  "policies.test.title": "测试规则命中",
+  "policies.test.desc":
+    "模拟一次请求形态，按优先级匹配规则，并查看第一条命中的规则。",
   "policies.list.title": "策略规则",
-  "policies.list.desc": "规则按范围合并：全局、集群、模型、租户，越具体优先级越高。",
-  "policies.list.empty": "暂无策略规则，将使用内置默认值。",
+  "policies.list.desc": "规则按优先级从高到低执行。第一条全部条件都满足的启用规则会生效。",
+  "policies.list.empty": "暂无策略规则。没有规则命中时，请求默认放行。",
   "policies.col.policy": "规则 ID",
   "policies.col.scope": "适用范围",
   "policies.col.long": "开始检查",
@@ -606,8 +694,13 @@ const zh: Dict = {
   "policies.col.minhit": "最低命中率",
   "policies.col.ttl": "事件有效期",
   "policies.col.enabled": "状态",
-  "policies.preview.title": "策略生效预览",
-  "policies.preview.desc": "选择模型、租户和集群，查看最终会应用哪条规则。",
+  "policies.col.priority": "优先级",
+  "policies.col.name": "名称",
+  "policies.col.conditions": "匹配条件",
+  "policies.col.action": "动作",
+  "policies.col.uncertain": "信号不确定",
+  "policies.preview.title": "规则命中预览",
+  "policies.preview.desc": "按请求形态测试会命中哪条规则，再真实发流量。",
   "policies.preview.btn": "预览",
   "policies.preview.merge": "应用规则",
   "policies.preview.long": "开始检查阈值",
@@ -617,8 +710,14 @@ const zh: Dict = {
   "policies.preview.stale": "事件过期处理",
   "policies.preview.weights": "GPU / CPU / 磁盘权重",
   "policies.preview.enabled": "最终状态",
+  "policies.preview.matched": "命中规则",
+  "policies.preview.no_match": "没有命中规则",
+  "policies.preview.evaluated": "已检查规则",
   "policies.field.id": "规则 ID",
   "policies.field.id_ph": "tenant-a-qwen",
+  "policies.field.name": "显示名称",
+  "policies.field.name_ph": "256 Token 以上要求 KV 命中",
+  "policies.field.priority": "优先级",
   "policies.field.scope_model": "适用模型",
   "policies.field.scope_tenant": "租户",
   "policies.field.scope_cluster": "适用集群",
@@ -628,11 +727,22 @@ const zh: Dict = {
   "policies.field.ph_any": "全部",
   "policies.field.long": "输入达到多少 Token 后检查",
   "policies.field.hard": "输入达到多少 Token 后直接拒绝",
+  "policies.field.input_tokens": "输入 Token 数",
+  "policies.field.preview_hit_ratio": "假设 KV 命中率",
+  "policies.field.action": "命中后动作",
+  "policies.field.low_hit": "命中率不足时",
+  "policies.field.uncertain": "信号不确定时",
+  "policies.field.reject_status": "拒绝状态码",
   "policies.field.minhit": "要求的 KV 最低命中率",
   "policies.field.ttl": "KV 事件有效期 (ms)",
   "policies.btn.save": "保存规则",
+  "policies.btn.add_condition": "添加条件",
   "policies.help.rule_id":
-    "这条规则的稳定名称，用于配置审计和生效策略的合并追踪。",
+    "这条规则的稳定 ID，用于配置审计、API 响应以及更新/删除路径。",
+  "policies.help.name":
+    "给运维看的可读名称。留空时页面会显示规则 ID。",
+  "policies.help.priority":
+    "数值越大越先执行。一条规则命中后，后续低优先级规则不会再判断。",
   "policies.help.cluster":
     "这条规则适用的 kv-indexer 集群，例如 local-vllm 或 local-sglang。留空表示当前后端里的所有集群。",
   "policies.help.scope":
@@ -650,7 +760,7 @@ const zh: Dict = {
   "policies.help.event_age":
     "KV 事件超过这个时间未更新时，监听器会被视为过期。过期事件流通常不做严格拒绝，因为驻留数据可能不完整。",
   "policies.help.status":
-    "停用的规则会被忽略，匹配会回退到更宽泛的规则，最后再回退到内置默认值。",
+    "停用的规则会被忽略。没有任何启用规则命中时，请求默认放行。",
   "policies.help.enabled":
     "临时启用或停用这条规则，不需要删除规则本身。",
   "policies.help.stale_behavior":
@@ -659,6 +769,63 @@ const zh: Dict = {
     "GPU、CPU、磁盘三种 KV 驻留层级的命中计分权重。权重越高，该层级对命中分数贡献越大。",
   "policies.help.applied_rules":
     "生成最终策略时参与合并的规则，顺序从更宽泛的默认规则到更具体的匹配规则。",
+  "policies.help.conditions":
+    "同一条规则内的所有条件必须同时满足。条件列表为空表示匹配所有请求。",
+  "policies.help.action":
+    "规则命中后执行的动作：放行、拒绝，或要求 KV 命中率达到阈值。",
+  "policies.help.input_tokens":
+    "请求完成分词后的输入长度。通常用它来配置“达到多少 Token 后开始要求缓存命中率”。",
+  "policies.help.preview_hit_ratio":
+    "仅用于规则预览的假设命中率。真实准入仍会查询实时 prefix index。",
+  "policies.help.low_hit":
+    "KV 命中率低于最低要求时怎么处理。",
+  "policies.help.uncertain":
+    "当缓存信号不可信时怎么处理，例如分词失败、hash 特性不支持、没有可用引擎，或 KV 事件流不可用。",
+  "policies.help.reject_status":
+    "规则拒绝请求时返回的 HTTP 状态码。准入限流建议使用 429。",
+  "policies.help.matched_rule":
+    "这次预览中第一条全部 AND 条件都满足的启用规则。",
+  "policies.help.result_reason":
+    "后端返回的原因码，说明为什么放行、拒绝或保守放行。",
+  "policies.help.evaluated_rules":
+    "按优先级依次检查过的规则，直到命中第一条为止。",
+  "policies.form.conditions": "匹配条件",
+  "policies.form.conditions_desc":
+    "同一条规则内条件按 AND 组合。不同规则之间按优先级 OR 命中。",
+  "policies.form.action": "执行动作",
+  "policies.conditions.all": "全部请求",
+  "policies.conditions.all_desc": "没有条件时，这条规则会匹配所有请求。",
+  "policies.condition.field": "字段",
+  "policies.condition.op": "关系",
+  "policies.condition.value": "值",
+  "policies.placeholder.list": "值1, 值2",
+  "policies.condition.field.cluster_id": "集群",
+  "policies.condition.field.model_id": "模型",
+  "policies.condition.field.tenant_id": "业务租户",
+  "policies.condition.field.input_tokens": "输入 Token 数",
+  "policies.condition.field.hit_ratio": "KV 命中率",
+  "policies.condition.field.best_hit_tokens": "最长命中 Token",
+  "policies.condition.field.effective_cached_tokens": "有效命中 Token",
+  "policies.condition.field.kv_event_state": "KV 事件状态",
+  "policies.condition.field.tokenized": "已分词",
+  "policies.condition.field.hash_supported": "Hash 特性支持",
+  "policies.condition.field.has_candidates": "存在可用引擎",
+  "policies.condition.op.eq": "=",
+  "policies.condition.op.neq": "!=",
+  "policies.condition.op.in": "属于",
+  "policies.condition.op.not_in": "不属于",
+  "policies.condition.op.gt": ">",
+  "policies.condition.op.gte": ">=",
+  "policies.condition.op.lt": "<",
+  "policies.condition.op.lte": "<=",
+  "policies.condition.op.contains": "包含",
+  "policies.action.accept": "放行",
+  "policies.action.reject": "拒绝",
+  "policies.action.require_cache_hit": "要求 KV 命中",
+  "policies.action.require_hit": "要求 KV 命中",
+  "policies.outcome.accept": "放行",
+  "policies.outcome.reject": "拒绝",
+  "policies.outcome.fallback_accept": "保守放行",
 
   // streams
   "streams.title": "KV 事件流",
@@ -776,7 +943,7 @@ const zh: Dict = {
   "sim.dec.fallback": "保守放行",
   "sim.dec.target": "建议目标：",
   "sim.dec.min": "最低要求命中率: {min} · 实际 {got}%",
-  "sim.dec.profile": "模型配置 v{p} · 配置 #{c} · 策略: {ids}",
+  "sim.dec.profile": "模型配置 v{p} · 配置 #{c} · 规则: {ids}",
 
   // protocols
   "protocol.openai.chat": "OpenAI Chat",

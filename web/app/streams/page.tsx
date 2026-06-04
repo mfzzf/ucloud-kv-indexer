@@ -8,7 +8,6 @@ import {
   api,
   IndexStat,
   KVEventRecord,
-  Policy,
   StreamHealth,
   streamStatus,
 } from "@/lib/api";
@@ -41,15 +40,10 @@ import { StreamStatusBadge, useRelativeTime } from "@/components/stream-status";
 import { useT } from "@/lib/i18n";
 import { useCluster, clusterQ } from "@/lib/cluster";
 
-// A connected listener that has gone quiet for longer than the configured freshness
-// TTL is effectively "stale" for admission. We give a generous floor so a normal lull
-// between events does not flap the badge.
-function staleWindow(policies: Policy[] | undefined): number {
-  const ttls = (policies ?? [])
-    .map((p) => p.event_freshness_ttl_ms)
-    .filter((v): v is number => typeof v === "number" && v > 0);
-  const ttl = ttls.length ? Math.max(...ttls) : 5000;
-  return Math.max(ttl * 6, 30_000);
+// UI-only freshness display. Backend admission trusts listener connection/gaps,
+// while this page still marks very quiet streams as stale for visibility.
+function staleWindow(): number {
+  return 60_000;
 }
 
 function eventKey(e: KVEventRecord): string {
@@ -79,10 +73,6 @@ export default function StreamsPage() {
   const stats = useQuery({
     queryKey: ["index", cluster],
     queryFn: () => api.get<IndexStat[]>(clusterQ("/index/stats", cluster)),
-  });
-  const policies = useQuery({
-    queryKey: ["policies", cluster],
-    queryFn: () => api.get<Policy[]>(clusterQ("/policies", cluster)),
   });
   const kvEvents = useQuery({
     queryKey: ["kv-events", cluster],
@@ -129,7 +119,7 @@ export default function StreamsPage() {
   }, [canStream, cluster]);
 
   const now = Date.now();
-  const staleAfterMs = staleWindow(policies.data);
+  const staleAfterMs = staleWindow();
   const list = streams.data ?? [];
   const unhealthy = list.filter(
     (s) => streamStatus(s, now, staleAfterMs) !== "healthy",

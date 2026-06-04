@@ -1,6 +1,6 @@
 package openapi
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 // KVIndexerSpec returns the OpenAPI document served by a single kvindexer
 // backend. It intentionally describes the stable HTTP surface, not internal Go
@@ -48,7 +48,7 @@ func spec(title string, gateway bool) map[string]any {
 			"post": op([]string{"Prefix"}, "Preview tokenization", "Shows normalized tokens and request_keys for a protocol request.", jsonBody("Tokenization preview request", tokenizePreviewSchema()), selectorParams),
 		},
 		"/config/effective-policy/preview": map[string]any{
-			"post": op([]string{"Policies"}, "Preview effective policy", "Resolves the merged policy for a model, tenant, and cluster scope.", jsonBody("Effective policy preview request", effectivePolicyPreviewSchema()), selectorParams),
+			"post": op([]string{"Policies"}, "Preview admission rules", "Evaluates the priority-ordered rule list for a request shape. Rule conditions are AND clauses; rules are OR by priority.", jsonBody("Rule preview request", effectivePolicyPreviewSchema()), selectorParams),
 		},
 
 		"/clusters": map[string]any{
@@ -271,6 +271,12 @@ func effectivePolicyPreviewSchema() map[string]any {
 		field("cluster_id", "string", "Cluster scope to preview."),
 		field("model_id", "string", "Model scope to preview."),
 		field("tenant_id", "string", "Tenant/customer/workspace scope to preview."),
+		field("input_tokens", "integer", "Input token count to test against token-count conditions."),
+		field("hit_ratio", "number", "Synthetic KV hit ratio for previewing require_cache_hit actions."),
+		field("fresh", "boolean", "Whether KV event signals are trusted for this preview. Defaults true."),
+		field("tokenized", "boolean", "Whether tokenization succeeded for this preview. Defaults true."),
+		field("hash_supported", "boolean", "Whether the request features are hash-supported. Defaults true."),
+		field("has_candidates", "boolean", "Whether at least one engine can serve the request. Defaults true."),
 	)
 }
 
@@ -344,19 +350,35 @@ func modelProfileSchema() map[string]any {
 }
 
 func policySchema() map[string]any {
-	return objectSchema([]string{"policy_id"},
-		field("policy_id", "string", "Stable rule id."),
-		objectField("scope", "Match scope: cluster_id, model_id, tenant_id. Empty means global."),
-		field("long_prompt_threshold_tokens", "integer", "Start checking KV hit rate at or above this input token count."),
-		field("hard_long_prompt_threshold_tokens", "integer", "Allow immediate rejection at or above this input token count when policy fails."),
-		field("min_hit_ratio_for_long_prompt", "number", "Minimum KV hit ratio for long prompts. 0.5 means 50%."),
-		field("event_freshness_ttl_ms", "integer", "Maximum KV event age before the listener is treated as stale."),
-		field("stale_event_behavior", "string", "Behavior when KV events are stale."),
-		field("low_hit_reject_status", "integer", "HTTP status used for low-hit rejection."),
-		field("gpu_hit_weight", "number", "GPU tier hit weight."),
-		field("cpu_hit_weight", "number", "CPU tier hit weight."),
-		field("disk_hit_weight", "number", "Disk tier hit weight."),
-		field("enabled", "boolean", "Whether this rule is enabled."),
+	return objectSchema([]string{"rule_id", "action"},
+		field("rule_id", "string", "Stable admission rule id."),
+		field("name", "string", "Human-readable rule name."),
+		field("priority", "integer", "Higher priority rules are evaluated first."),
+		arrayField("conditions", "AND conditions. Empty means match every request.", ruleConditionSchema()),
+		map[string]any{"name": "action", "description": "Action to execute when all conditions match.", "allOf": []any{ruleActionSchema()}},
+		field("enabled", "boolean", "Whether this rule is enabled. Omitted means enabled."),
+	)
+}
+
+func ruleConditionSchema() map[string]any {
+	return objectSchema([]string{"field", "op"},
+		map[string]any{"name": "field", "type": "string", "description": "Request/observability field to compare.", "enum": []string{
+			"cluster_id", "model_id", "tenant_id", "input_tokens", "hit_ratio",
+			"best_hit_tokens", "effective_cached_tokens", "kv_event_state",
+			"tokenized", "hash_supported", "has_candidates",
+		}},
+		map[string]any{"name": "op", "type": "string", "description": "Comparison operator.", "enum": []string{"eq", "neq", "in", "not_in", "gt", "gte", "lt", "lte", "contains"}},
+		map[string]any{"name": "value", "description": "Comparison value. For in/not_in, pass an array."},
+	)
+}
+
+func ruleActionSchema() map[string]any {
+	return objectSchema([]string{"type"},
+		map[string]any{"name": "type", "type": "string", "description": "Action type.", "enum": []string{"accept", "reject", "require_cache_hit"}},
+		field("min_hit_ratio", "number", "Required KV hit ratio when type=require_cache_hit. 0.5 means 50%."),
+		map[string]any{"name": "on_low_hit", "type": "string", "description": "Outcome when cache hit ratio is below min_hit_ratio.", "enum": []string{"accept", "reject", "fallback_accept"}},
+		map[string]any{"name": "on_uncertain", "type": "string", "description": "Outcome when tokenization/hash/events/candidate signal is unavailable.", "enum": []string{"accept", "reject", "fallback_accept"}},
+		field("reject_status", "integer", "HTTP status used for reject outcomes. Defaults to 429."),
 	)
 }
 

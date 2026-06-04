@@ -73,69 +73,125 @@ func (p ModelProfile) Namespace() string {
 	return p.ModelID + "/v" + itoa(p.Version) + "/" + p.HashProfile + "/" + itoa(p.BlockSize)
 }
 
-// Scope identifies what a policy applies to. Empty fields are wildcards.
-// Resolution order (lowest→highest precedence): global < cluster < model <
-// tenant. The most specific matching policy's fields win field-by-field.
-type Scope struct {
-	ClusterID string `json:"cluster_id,omitempty"`
-	ModelID   string `json:"model_id,omitempty"`
-	TenantID  string `json:"tenant_id,omitempty"`
+// RuleCondition is one AND clause inside an admission rule. Every condition in
+// a rule must match. Rules themselves are evaluated as an ordered OR list: the
+// first enabled matching rule wins.
+type RuleCondition struct {
+	Field string `json:"field" bson:"field" yaml:"field"`
+	Op    string `json:"op" bson:"op" yaml:"op"`
+	Value any    `json:"value,omitempty" bson:"value,omitempty" yaml:"value,omitempty"`
 }
 
-// Policy is a routing + admission policy. Pointer fields allow partial
-// overrides during effective-policy merge (nil = inherit).
+const (
+	ConditionOpEq       = "eq"
+	ConditionOpNeq      = "neq"
+	ConditionOpIn       = "in"
+	ConditionOpNotIn    = "not_in"
+	ConditionOpGT       = "gt"
+	ConditionOpGTE      = "gte"
+	ConditionOpLT       = "lt"
+	ConditionOpLTE      = "lte"
+	ConditionOpContains = "contains"
+)
+
+const (
+	ConditionFieldClusterID             = "cluster_id"
+	ConditionFieldModelID               = "model_id"
+	ConditionFieldTenantID              = "tenant_id"
+	ConditionFieldInputTokens           = "input_tokens"
+	ConditionFieldHitRatio              = "hit_ratio"
+	ConditionFieldBestHitTokens         = "best_hit_tokens"
+	ConditionFieldEffectiveCachedTokens = "effective_cached_tokens"
+	ConditionFieldKVEventState          = "kv_event_state"
+	ConditionFieldTokenized             = "tokenized"
+	ConditionFieldHashSupported         = "hash_supported"
+	ConditionFieldHasCandidates         = "has_candidates"
+)
+
+const (
+	KVEventStateAvailable = "available"
+	KVEventStateStale     = "stale"
+)
+
+// RuleAction is executed when its parent rule matches.
+type RuleAction struct {
+	Type         string   `json:"type" bson:"type" yaml:"type"`
+	MinHitRatio  *float64 `json:"min_hit_ratio,omitempty" bson:"min_hit_ratio,omitempty" yaml:"min_hit_ratio,omitempty"`
+	OnLowHit     string   `json:"on_low_hit,omitempty" bson:"on_low_hit,omitempty" yaml:"on_low_hit,omitempty"`
+	OnUncertain  string   `json:"on_uncertain,omitempty" bson:"on_uncertain,omitempty" yaml:"on_uncertain,omitempty"`
+	RejectStatus int      `json:"reject_status,omitempty" bson:"reject_status,omitempty" yaml:"reject_status,omitempty"`
+}
+
+const (
+	ActionAccept          = "accept"
+	ActionReject          = "reject"
+	ActionRequireCacheHit = "require_cache_hit"
+)
+
+const (
+	RuleOutcomeAccept         = "accept"
+	RuleOutcomeReject         = "reject"
+	RuleOutcomeFallbackAccept = "fallback_accept"
+)
+
+// Policy is one admission rule. The persisted policy set is a priority-ordered
+// OR list; each rule's Conditions are AND clauses. An empty condition list is a
+// catch-all rule.
 type Policy struct {
-	PolicyID string `json:"policy_id"`
-	Scope    Scope  `json:"scope"`
-
-	LongPromptThresholdTokens     *int     `json:"long_prompt_threshold_tokens,omitempty"`
-	HardLongPromptThresholdTokens *int     `json:"hard_long_prompt_threshold_tokens,omitempty"`
-	MinHitRatioForLongPrompt      *float64 `json:"min_hit_ratio_for_long_prompt,omitempty"`
-	EventFreshnessTTLMs           *int     `json:"event_freshness_ttl_ms,omitempty"`
-	// StaleEventBehavior: "fallback" (accept) or "reject_hard" (429 only above
-	// hard threshold).
-	StaleEventBehavior *string `json:"stale_event_behavior,omitempty"`
-	// LowHitRejectStatus is the HTTP status for low-hit long prompts (429).
-	LowHitRejectStatus *int `json:"low_hit_reject_status,omitempty"`
-	// Tier weights for hit-token credit when computing effective cached tokens.
-	GPUHitWeight  *float64 `json:"gpu_hit_weight,omitempty"`
-	CPUHitWeight  *float64 `json:"cpu_hit_weight,omitempty"`
-	DiskHitWeight *float64 `json:"disk_hit_weight,omitempty"`
-	// Enabled toggles the whole admission judgment; when false, always accept.
-	Enabled *bool `json:"enabled,omitempty"`
+	RuleID     string          `json:"rule_id" bson:"rule_id" yaml:"rule_id"`
+	Name       string          `json:"name,omitempty" bson:"name,omitempty" yaml:"name,omitempty"`
+	Priority   int             `json:"priority" bson:"priority" yaml:"priority"`
+	Conditions []RuleCondition `json:"conditions,omitempty" bson:"conditions,omitempty" yaml:"conditions,omitempty"`
+	Action     RuleAction      `json:"action" bson:"action" yaml:"action"`
+	// nil means enabled. This keeps API PATCH ergonomic while making newly
+	// authored rules active unless they explicitly opt out.
+	Enabled *bool `json:"enabled,omitempty" bson:"enabled,omitempty" yaml:"enabled,omitempty"`
 }
 
-// EffectivePolicy is a fully-resolved policy with no nil fields.
-type EffectivePolicy struct {
-	LongPromptThresholdTokens     int     `json:"long_prompt_threshold_tokens"`
-	HardLongPromptThresholdTokens int     `json:"hard_long_prompt_threshold_tokens"`
-	MinHitRatioForLongPrompt      float64 `json:"min_hit_ratio_for_long_prompt"`
-	EventFreshnessTTLMs           int     `json:"event_freshness_ttl_ms"`
-	StaleEventBehavior            string  `json:"stale_event_behavior"`
-	LowHitRejectStatus            int     `json:"low_hit_reject_status"`
-	GPUHitWeight                  float64 `json:"gpu_hit_weight"`
-	CPUHitWeight                  float64 `json:"cpu_hit_weight"`
-	DiskHitWeight                 float64 `json:"disk_hit_weight"`
-	Enabled                       bool    `json:"enabled"`
-	// SourcePolicyIDs lists the policies that contributed, in merge order.
-	SourcePolicyIDs []string `json:"source_policy_ids"`
+func (p Policy) IsEnabled() bool {
+	return p.Enabled == nil || *p.Enabled
 }
 
-// DefaultEffectivePolicy is the global default (PLAN.md recommended config).
-func DefaultEffectivePolicy() EffectivePolicy {
-	return EffectivePolicy{
-		LongPromptThresholdTokens:     8192,
-		HardLongPromptThresholdTokens: 32768,
-		MinHitRatioForLongPrompt:      0.50,
-		EventFreshnessTTLMs:           5000,
-		StaleEventBehavior:            "fallback",
-		LowHitRejectStatus:            429,
-		GPUHitWeight:                  1.0,
-		CPUHitWeight:                  0.75,
-		DiskHitWeight:                 0.25,
-		Enabled:                       true,
-		SourcePolicyIDs:               []string{"__global_default__"},
+func (p Policy) DisplayName() string {
+	if p.Name != "" {
+		return p.Name
 	}
+	return p.RuleID
+}
+
+func (a RuleAction) TypeOrDefault() string {
+	if a.Type == "" {
+		return ActionAccept
+	}
+	return a.Type
+}
+
+func (a RuleAction) RejectStatusOrDefault() int {
+	if a.RejectStatus > 0 {
+		return a.RejectStatus
+	}
+	return 429
+}
+
+func (a RuleAction) MinHitRatioOrDefault() float64 {
+	if a.MinHitRatio != nil {
+		return *a.MinHitRatio
+	}
+	return 0
+}
+
+func (a RuleAction) OnLowHitOrDefault() string {
+	if a.OnLowHit != "" {
+		return a.OnLowHit
+	}
+	return RuleOutcomeReject
+}
+
+func (a RuleAction) OnUncertainOrDefault() string {
+	if a.OnUncertain != "" {
+		return a.OnUncertain
+	}
+	return RuleOutcomeFallbackAccept
 }
 
 // AuditEntry records one configuration mutation.

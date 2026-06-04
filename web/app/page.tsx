@@ -14,7 +14,6 @@ import {
   Engine,
   IndexStat,
   ModelProfile,
-  Policy,
   RouteRecord,
   StreamHealth,
   streamStatus,
@@ -72,11 +71,6 @@ export default function Overview() {
     queryKey: ["index", cluster],
     queryFn: () => api.get<IndexStat[]>(clusterQ("/index/stats", cluster)),
   });
-  const policies = useQuery({
-    queryKey: ["policies", cluster],
-    queryFn: () => api.get<Policy[]>(clusterQ("/policies", cluster)),
-  });
-
   const chartConfig = {
     ratio: { label: t("overview.col.hit") + " (%)", color: "var(--chart-1)" },
   } satisfies ChartConfig;
@@ -89,13 +83,9 @@ export default function Overview() {
   const fallbackRate = total ? ((fallbacks / total) * 100).toFixed(1) : "0.0";
 
   const streamList = streams.data ?? [];
-  // "Healthy" here means the listener is actually fit for admission (connected,
-  // fresh, no gaps/decode errors) — not merely TCP-connected. The stale window is
-  // derived from the longest configured freshness TTL, with a sane floor.
-  const ttls = (policies.data ?? [])
-    .map((p) => p.event_freshness_ttl_ms)
-    .filter((v): v is number => typeof v === "number" && v > 0);
-  const staleAfterMs = Math.max((ttls.length ? Math.max(...ttls) : 5000) * 6, 30_000);
+  // UI-only freshness display. Backend admission trusts listener connection/gaps,
+  // while the dashboard still marks very quiet streams as stale for visibility.
+  const staleAfterMs = 60_000;
   const now = Date.now();
   const healthyStreams = streamList.filter(
     (s) => streamStatus(s, now, staleAfterMs) === "healthy",

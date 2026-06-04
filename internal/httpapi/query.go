@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ucloud/kv-indexer/internal/admission"
+	"github.com/ucloud/kv-indexer/internal/config"
 	"github.com/ucloud/kv-indexer/internal/normalize"
 	"github.com/ucloud/kv-indexer/internal/residency"
 	"github.com/ucloud/kv-indexer/internal/types"
@@ -179,9 +181,20 @@ func (s *Service) handleTokenizePreview(w http.ResponseWriter, r *http.Request) 
 // ---- /config/effective-policy/preview ----
 
 type EffectivePolicyPreviewRequest struct {
-	ClusterID string `json:"cluster_id,omitempty"`
-	ModelID   string `json:"model_id,omitempty"`
-	TenantID  string `json:"tenant_id,omitempty"`
+	ClusterID     string   `json:"cluster_id,omitempty"`
+	ModelID       string   `json:"model_id,omitempty"`
+	TenantID      string   `json:"tenant_id,omitempty"`
+	InputTokens   int      `json:"input_tokens,omitempty"`
+	HitRatio      *float64 `json:"hit_ratio,omitempty"`
+	Fresh         *bool    `json:"fresh,omitempty"`
+	Tokenized     *bool    `json:"tokenized,omitempty"`
+	HashSupported *bool    `json:"hash_supported,omitempty"`
+	HasCandidates *bool    `json:"has_candidates,omitempty"`
+}
+
+type EffectivePolicyPreviewResponse struct {
+	Rules  []config.Policy  `json:"rules"`
+	Result admission.Result `json:"result"`
 }
 
 func (s *Service) handleEffectivePolicyPreview(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +203,48 @@ func (s *Service) handleEffectivePolicyPreview(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	eff := s.Store.EffectivePolicy(req.ClusterID, req.ModelID, req.TenantID)
-	writeJSON(w, http.StatusOK, eff)
+	fresh, tokenized, hashSupported, hasCandidates := true, true, true, true
+	if req.Fresh != nil {
+		fresh = *req.Fresh
+	}
+	if req.Tokenized != nil {
+		tokenized = *req.Tokenized
+	}
+	if req.HashSupported != nil {
+		hashSupported = *req.HashSupported
+	}
+	if req.HasCandidates != nil {
+		hasCandidates = *req.HasCandidates
+	}
+	rules := s.Store.ListPolicies()
+	var hitOverride *admission.HitInfo
+	if req.HitRatio != nil {
+		ratio := *req.HitRatio
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		eff := int(float64(req.InputTokens) * ratio)
+		hitOverride = &admission.HitInfo{
+			InputTokens:           req.InputTokens,
+			BestHitTokens:         eff,
+			HitRatio:              ratio,
+			EffectiveCachedTokens: eff,
+		}
+	}
+	result := admission.Evaluate(admission.Input{
+		ClusterID:     req.ClusterID,
+		ModelID:       req.ModelID,
+		TenantID:      req.TenantID,
+		InputTokens:   req.InputTokens,
+		Rules:         rules,
+		HitOverride:   hitOverride,
+		Fresh:         fresh,
+		Tokenized:     tokenized,
+		HashSupported: hashSupported,
+		HasCandidates: hasCandidates,
+	})
+	writeJSON(w, http.StatusOK, EffectivePolicyPreviewResponse{Rules: rules, Result: result})
 }

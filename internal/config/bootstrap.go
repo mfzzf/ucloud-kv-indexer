@@ -93,15 +93,12 @@ type BootstrapProfile struct {
 }
 
 type BootstrapPolicy struct {
-	PolicyID                      string   `yaml:"policy_id"`
-	ScopeClusterID                string   `yaml:"scope_cluster_id"`
-	ScopeModelID                  string   `yaml:"scope_model_id"`
-	ScopeTenantID                 string   `yaml:"scope_tenant_id"`
-	LongPromptThresholdTokens     *int     `yaml:"long_prompt_threshold_tokens"`
-	HardLongPromptThresholdTokens *int     `yaml:"hard_long_prompt_threshold_tokens"`
-	MinHitRatioForLongPrompt      *float64 `yaml:"min_hit_ratio_for_long_prompt"`
-	EventFreshnessTTLMs           *int     `yaml:"event_freshness_ttl_ms"`
-	Enabled                       *bool    `yaml:"enabled"`
+	RuleID     string          `yaml:"rule_id"`
+	Name       string          `yaml:"name"`
+	Priority   int             `yaml:"priority"`
+	Conditions []RuleCondition `yaml:"conditions"`
+	Action     RuleAction      `yaml:"action"`
+	Enabled    *bool           `yaml:"enabled"`
 }
 
 // LoadBootstrap parses a YAML bootstrap/config file and flattens the nested form.
@@ -260,17 +257,12 @@ func (s *Store) ApplyBootstrapForCluster(bs *Bootstrap, clusterID string) bool {
 			continue
 		}
 		s.UpsertPolicy(Policy{
-			PolicyID: p.PolicyID,
-			Scope: Scope{
-				ClusterID: p.ScopeClusterID,
-				ModelID:   p.ScopeModelID,
-				TenantID:  p.ScopeTenantID,
-			},
-			LongPromptThresholdTokens:     p.LongPromptThresholdTokens,
-			HardLongPromptThresholdTokens: p.HardLongPromptThresholdTokens,
-			MinHitRatioForLongPrompt:      p.MinHitRatioForLongPrompt,
-			EventFreshnessTTLMs:           p.EventFreshnessTTLMs,
-			Enabled:                       p.Enabled,
+			RuleID:     p.RuleID,
+			Name:       p.Name,
+			Priority:   p.Priority,
+			Conditions: p.Conditions,
+			Action:     p.Action,
+			Enabled:    p.Enabled,
 		})
 	}
 	return true
@@ -279,11 +271,64 @@ func (s *Store) ApplyBootstrapForCluster(bs *Bootstrap, clusterID string) bool {
 // policyInScope reports whether a policy is relevant to a scoped cluster: it
 // targets the cluster, targets a model the cluster serves, or is global.
 func policyInScope(p BootstrapPolicy, clusterID string, servedModels map[string]bool) bool {
-	if p.ScopeClusterID != "" && p.ScopeClusterID != clusterID {
-		return false
-	}
-	if p.ScopeModelID != "" && !servedModels[p.ScopeModelID] {
-		return false
+	for _, c := range p.Conditions {
+		switch c.Field {
+		case ConditionFieldClusterID:
+			if conditionExcludesString(c, clusterID) {
+				return false
+			}
+		case ConditionFieldModelID:
+			if conditionExcludesServedModel(c, servedModels) {
+				return false
+			}
+		}
 	}
 	return true
+}
+
+func conditionExcludesString(c RuleCondition, value string) bool {
+	switch c.Op {
+	case ConditionOpEq:
+		return fmt.Sprint(c.Value) != value
+	case ConditionOpIn:
+		for _, v := range valueList(c.Value) {
+			if fmt.Sprint(v) == value {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func conditionExcludesServedModel(c RuleCondition, servedModels map[string]bool) bool {
+	switch c.Op {
+	case ConditionOpEq:
+		return !servedModels[fmt.Sprint(c.Value)]
+	case ConditionOpIn:
+		for _, v := range valueList(c.Value) {
+			if servedModels[fmt.Sprint(v)] {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func valueList(v any) []any {
+	switch x := v.(type) {
+	case []any:
+		return x
+	case []string:
+		out := make([]any, 0, len(x))
+		for _, s := range x {
+			out = append(out, s)
+		}
+		return out
+	default:
+		return []any{x}
+	}
 }

@@ -23,15 +23,13 @@ For each request:
 3. **Compute prefix request-keys** — a deterministic chained hash over `block_size`
    token chunks, namespaced per model-profile version.
 4. **Query the residency index** built from the engine's ZMQ KV-cache event stream.
-5. **Judge admission** against the effective policy:
+5. **Judge admission** against the priority-ordered policy rules:
 
    ```
-   input < long_prompt_threshold        -> accept (ordinary)
-   hard cap exceeded                    -> 429 (capacity)
-   events stale / untokenizable / no
-     candidates / unsupported features  -> fallback accept (never low-hit 429)
-   best_hit_ratio < min_hit_ratio       -> 429 long_prompt_low_cache_hit
-   else                                 -> accept (high cache hit)
+   first enabled rule whose conditions all match -> execute its action
+   require_cache_hit + uncertain signal          -> fallback accept by default
+   require_cache_hit + hit_ratio below threshold -> reject by default
+   no matching rule                              -> accept
    ```
 
 The cache-hit signal is only trusted when the event stream is healthy (listener
@@ -99,7 +97,7 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
 internal/
   types/        shared request types
   config/       dynamic config store (clusters/engines/profiles/policies); versioning +
-                audit + effective-policy merge; persisters: memory | file JSON | SQLite | MongoDB
+                audit + priority rule persistence; persisters: memory | file JSON | SQLite | MongoDB
   normalize/    protocol -> RouteRequest; framework adapters (AdapterFor("vllm"|"sglang"))
   tokenizer/    HTTP client to the engine /tokenize endpoint (never tokenizes locally)
   residency/    dual-key prefix index (request_key + engine_key bridge) + manager
@@ -234,9 +232,23 @@ clusters:
         replay_endpoint:  tcp://127.0.0.1:5560
         served_models: [qwen3.5-4b]
 policies:
-  - policy_id: local-default
-    long_prompt_threshold_tokens: 256
-    min_hit_ratio_for_long_prompt: 0.5
+  - rule_id: local-vllm-cache-gate
+    name: 256 Token 以上要求 KV 命中
+    priority: 100
+    conditions:
+      - field: cluster_id
+        op: eq
+        value: local-vllm
+      - field: input_tokens
+        op: gte
+        value: 256
+    action:
+      type: require_cache_hit
+      min_hit_ratio: 0.5
+      on_low_hit: reject
+      on_uncertain: fallback_accept
+      reject_status: 429
+    enabled: true
 ```
 
 - Each kvindexer seeds from its own YAML **scoped to its `-cluster`**, once, when its
@@ -357,7 +369,7 @@ writes/queries target one backend).
 | POST | `/route` | admission judgment (alias of chat) |
 | POST | `/query-prefix` | Mooncake/Dynamo-style per-instance prefix hits |
 | POST | `/tokenize/preview` | tokens + request-keys for a request (per framework adapter) |
-| POST | `/config/effective-policy/preview` | resolve merged policy |
+| POST | `/config/effective-policy/preview` | preview priority rule matching |
 | GET/POST/PATCH/DELETE | `/clusters`, `/engines`, `/model-profiles`, `/policies` | config CRUD (`DELETE` currently applies to policies via `/policies/{id}` and admin connections via the gateway) |
 | GET | `/event-streams`, `/kv-events/recent`, `/decisions`, `/config/audit-log`, `/index/stats` | observability |
 | GET (SSE) | `/kv-events/stream` | live decoded KV-event stream for one selected backend/cluster |
@@ -389,10 +401,10 @@ make smoke         # end-to-end against the live engines (needs `make inference`
   matching, gap breaks, removal, AllBlocksCleared, mamba tail-align bridge, tier breakdown.
 - `internal/kvevents` — msgpack decode against a **real captured golden batch**, uint64
   coercion, short-array tolerance.
-- `internal/admission` — the full 429 policy matrix (short / hard-cap / low-hit /
-  high-hit / stale / untokenized / hash-unsupported / disabled).
-- `internal/config` — effective-policy merge order, scope filtering, version bump,
-  snapshot round-trip, SQLite persister round-trip, nested-config flattening.
+- `internal/admission` — priority rule matching, AND conditions, cache-hit actions,
+  uncertain-signal fallback, and explicit reject outcomes.
+- `internal/config` — rule persistence, priority sorting, version bump, snapshot
+  round-trip, SQLite persister round-trip, nested-config flattening.
 - `internal/normalize` — all three protocols + both framework adapters + multimodal detection.
 - `internal/gateway` — fan-out merge + cluster/backend selection.
 

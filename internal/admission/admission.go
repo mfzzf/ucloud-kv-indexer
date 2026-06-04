@@ -1,18 +1,23 @@
-// Package admission implements the length + cache-hit-rate ADMISSION judgment.
-// It is NOT a scheduler: it only decides whether to accept a request or reject
-// it (429), and reports the best cache-hit instance for observability. The
-// rules follow PLAN.md:
-//
-//	input < long_prompt_threshold            -> accept (ordinary)
-//	hard cap exceeded                        -> 429 (capacity)
-//	events stale/unavailable/hash-mismatch   -> fallback accept (never low-hit 429)
-//	best_hit_ratio < min_hit_ratio (long)    -> 429 long_prompt_low_cache_hit
-//	else                                     -> accept
+// Package admission implements rule-based KV-cache admission. A policy set is
+// evaluated as an ordered OR list: rules are sorted by priority descending, and
+// the first enabled rule whose conditions all match decides the request.
 package admission
 
 import (
+	"fmt"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+
 	"github.com/ucloud/kv-indexer/internal/config"
 	"github.com/ucloud/kv-indexer/internal/residency"
+)
+
+const (
+	gpuHitWeight  = 1.0
+	cpuHitWeight  = 0.75
+	diskHitWeight = 0.25
 )
 
 // Decision is the admission verdict.
@@ -27,15 +32,16 @@ const (
 type Reason string
 
 const (
-	ReasonOrdinaryShort        Reason = "ordinary_short_prompt"
-	ReasonLongPromptHighHit    Reason = "long_prompt_high_cache_hit"
-	ReasonLongPromptLowHit     Reason = "long_prompt_low_cache_hit"
-	ReasonHardCapacityExceeded Reason = "hard_capacity_limit_exceeded"
+	ReasonNoMatchingRule       Reason = "no_matching_policy_rule"
+	ReasonRuleAccepted         Reason = "policy_rule_accept"
+	ReasonRuleRejected         Reason = "policy_rule_reject"
+	ReasonCacheHitRequirement  Reason = "kv_cache_hit_requirement_met"
+	ReasonCacheHitTooLow       Reason = "kv_cache_hit_requirement_failed"
 	ReasonFallbackStale        Reason = "fallback_stale_events"
 	ReasonFallbackUnavailable  Reason = "fallback_tokenization_unavailable"
 	ReasonFallbackHashMismatch Reason = "fallback_hash_feature_unsupported"
-	ReasonPolicyDisabled       Reason = "policy_disabled"
 	ReasonNoCandidates         Reason = "no_eligible_candidates"
+	ReasonUnknownAction        Reason = "unknown_policy_action"
 )
 
 // HitInfo summarizes the best instance's cache hit for the request.
@@ -53,11 +59,16 @@ type HitInfo struct {
 
 // Input bundles everything the judgment needs.
 type Input struct {
+	ClusterID string
+	ModelID   string
+	TenantID  string
+
 	InputTokens int
 	BlockSize   int
-	Policy      config.EffectivePolicy
+	Rules       []config.Policy
 	Query       *residency.QueryResult // may be nil if no query was possible
-	// Fresh indicates events for the matched residency are within TTL.
+	HitOverride *HitInfo               // optional synthetic hit, used by previews
+	// Fresh indicates events for the matched residency are trustworthy.
 	Fresh bool
 	// Tokenized indicates tokenization succeeded (token IDs trusted).
 	Tokenized bool
@@ -75,13 +86,24 @@ type Result struct {
 	HTTPStatus int      `json:"http_status"`
 	Fallback   bool     `json:"fallback"`
 	Hit        HitInfo  `json:"hit"`
-	// MinRequiredHitRatio echoes the threshold used (for long prompts).
-	MinRequiredHitRatio float64 `json:"min_required_hit_ratio"`
+	// MinRequiredHitRatio echoes the threshold used by require_cache_hit.
+	MinRequiredHitRatio float64  `json:"min_required_hit_ratio"`
+	MatchedRuleID       string   `json:"matched_rule_id,omitempty"`
+	MatchedRuleName     string   `json:"matched_rule_name,omitempty"`
+	MatchedRulePriority int      `json:"matched_rule_priority,omitempty"`
+	EvaluatedRuleIDs    []string `json:"evaluated_rule_ids,omitempty"`
 }
 
 // bestHit picks the instance with the largest tier-weighted effective cached
 // tokens and fills a HitInfo. Returns zero HitInfo if no query/instances.
 func bestHit(in Input) HitInfo {
+	if in.HitOverride != nil {
+		hi := *in.HitOverride
+		if hi.InputTokens == 0 {
+			hi.InputTokens = in.InputTokens
+		}
+		return hi
+	}
 	hi := HitInfo{InputTokens: in.InputTokens}
 	if in.Query == nil {
 		return hi
@@ -99,9 +121,9 @@ func bestHit(in Input) HitInfo {
 		if diskOnly < 0 {
 			diskOnly = 0
 		}
-		eff := float64(gpu)*in.Policy.GPUHitWeight +
-			float64(cpuOnly)*in.Policy.CPUHitWeight +
-			float64(diskOnly)*in.Policy.DiskHitWeight
+		eff := float64(gpu)*gpuHitWeight +
+			float64(cpuOnly)*cpuHitWeight +
+			float64(diskOnly)*diskHitWeight
 		if eff > bestEff {
 			bestEff = eff
 			hi.InstanceID = id
@@ -113,7 +135,6 @@ func bestHit(in Input) HitInfo {
 		}
 	}
 	if in.InputTokens > 0 {
-		// Hit ratio uses effective cached tokens, capped at input length.
 		eff := hi.EffectiveCachedTokens
 		if eff > in.InputTokens {
 			eff = in.InputTokens
@@ -123,58 +144,87 @@ func bestHit(in Input) HitInfo {
 	return hi
 }
 
-// Evaluate runs the admission judgment.
+// Evaluate runs the rule-based admission judgment.
 func Evaluate(in Input) Result {
-	pol := in.Policy
 	hit := bestHit(in)
-	res := Result{Hit: hit, MinRequiredHitRatio: pol.MinHitRatioForLongPrompt}
+	res := Result{Hit: hit}
+	rules := append([]config.Policy(nil), in.Rules...)
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].Priority != rules[j].Priority {
+			return rules[i].Priority > rules[j].Priority
+		}
+		return rules[i].RuleID < rules[j].RuleID
+	})
 
-	// Policy disabled => always accept (ordinary).
-	if !pol.Enabled {
-		return accept(res, ReasonPolicyDisabled, false)
+	for _, rule := range rules {
+		if rule.RuleID != "" {
+			res.EvaluatedRuleIDs = append(res.EvaluatedRuleIDs, rule.RuleID)
+		}
+		if !rule.IsEnabled() || rule.RuleID == "" {
+			continue
+		}
+		if !matchesRule(in, hit, rule) {
+			continue
+		}
+		res.MatchedRuleID = rule.RuleID
+		res.MatchedRuleName = rule.DisplayName()
+		res.MatchedRulePriority = rule.Priority
+		return applyAction(in, res, rule.Action)
 	}
 
-	// Hard capacity / context limit is checked first and unconditionally.
-	if pol.HardLongPromptThresholdTokens > 0 && in.InputTokens >= pol.HardLongPromptThresholdTokens {
-		res.Decision = DecisionReject
-		res.Reason = ReasonHardCapacityExceeded
-		res.HTTPStatus = pol.LowHitRejectStatus
-		return res
-	}
+	return accept(res, ReasonNoMatchingRule, false)
+}
 
-	// Short prompts always route ordinarily.
-	if in.InputTokens < pol.LongPromptThresholdTokens {
-		return accept(res, ReasonOrdinaryShort, false)
+func applyAction(in Input, res Result, action config.RuleAction) Result {
+	switch action.TypeOrDefault() {
+	case config.ActionAccept:
+		return accept(res, ReasonRuleAccepted, false)
+	case config.ActionReject:
+		return reject(res, ReasonRuleRejected, action.RejectStatusOrDefault())
+	case config.ActionRequireCacheHit:
+		res.MinRequiredHitRatio = action.MinHitRatioOrDefault()
+		if reason, uncertain := uncertaintyReason(in); uncertain {
+			return applyOutcome(res, action.OnUncertainOrDefault(), reason, action.RejectStatusOrDefault(), true)
+		}
+		if res.Hit.HitRatio < res.MinRequiredHitRatio {
+			return applyOutcome(res, action.OnLowHitOrDefault(), ReasonCacheHitTooLow, action.RejectStatusOrDefault(), false)
+		}
+		return accept(res, ReasonCacheHitRequirement, false)
+	default:
+		return reject(res, ReasonUnknownAction, action.RejectStatusOrDefault())
 	}
+}
 
-	// From here the prompt is "long". If we cannot trust the hit signal, we
-	// fall back to accepting (never low-hit 429 under uncertainty).
+func uncertaintyReason(in Input) (Reason, bool) {
 	if !in.Tokenized {
-		return accept(res, ReasonFallbackUnavailable, true)
+		return ReasonFallbackUnavailable, true
 	}
 	if !in.HashSupported {
-		return accept(res, ReasonFallbackHashMismatch, true)
+		return ReasonFallbackHashMismatch, true
 	}
 	if !in.HasCandidates {
-		// No engine to serve it; this is a routing concern. Accept as fallback
-		// (the gateway handles absence of a target). Checked before freshness
-		// so the reason is precise.
-		return accept(res, ReasonNoCandidates, true)
+		return ReasonNoCandidates, true
 	}
 	if !in.Fresh {
-		// Stale/disconnected event stream: the index view can't be trusted, so
-		// a miss might be spurious. Fall back rather than 429.
-		return accept(res, ReasonFallbackStale, true)
+		return ReasonFallbackStale, true
 	}
+	return "", false
+}
 
-	// Long prompt with a trustworthy hit signal: apply the hit-ratio gate.
-	if hit.HitRatio < pol.MinHitRatioForLongPrompt {
-		res.Decision = DecisionReject
-		res.Reason = ReasonLongPromptLowHit
-		res.HTTPStatus = pol.LowHitRejectStatus
-		return res
+func applyOutcome(res Result, outcome string, reason Reason, status int, uncertainty bool) Result {
+	switch outcome {
+	case config.RuleOutcomeAccept:
+		return accept(res, reason, false)
+	case config.RuleOutcomeFallbackAccept:
+		return accept(res, reason, true)
+	case config.RuleOutcomeReject:
+		return reject(res, reason, status)
+	default:
+		if uncertainty {
+			return accept(res, reason, true)
+		}
+		return reject(res, reason, status)
 	}
-	return accept(res, ReasonLongPromptHighHit, false)
 }
 
 func accept(res Result, reason Reason, fallback bool) Result {
@@ -183,4 +233,171 @@ func accept(res Result, reason Reason, fallback bool) Result {
 	res.HTTPStatus = 200
 	res.Fallback = fallback
 	return res
+}
+
+func reject(res Result, reason Reason, status int) Result {
+	res.Decision = DecisionReject
+	res.Reason = reason
+	if status <= 0 {
+		status = 429
+	}
+	res.HTTPStatus = status
+	return res
+}
+
+func matchesRule(in Input, hit HitInfo, rule config.Policy) bool {
+	for _, cond := range rule.Conditions {
+		actual, ok := conditionValue(in, hit, cond.Field)
+		if !ok || !matchesCondition(actual, cond) {
+			return false
+		}
+	}
+	return true
+}
+
+func conditionValue(in Input, hit HitInfo, field string) (any, bool) {
+	switch field {
+	case config.ConditionFieldClusterID:
+		return in.ClusterID, true
+	case config.ConditionFieldModelID:
+		return in.ModelID, true
+	case config.ConditionFieldTenantID:
+		return in.TenantID, true
+	case config.ConditionFieldInputTokens:
+		return in.InputTokens, true
+	case config.ConditionFieldHitRatio:
+		return hit.HitRatio, true
+	case config.ConditionFieldBestHitTokens:
+		return hit.BestHitTokens, true
+	case config.ConditionFieldEffectiveCachedTokens:
+		return hit.EffectiveCachedTokens, true
+	case config.ConditionFieldKVEventState:
+		if in.Fresh {
+			return config.KVEventStateAvailable, true
+		}
+		return config.KVEventStateStale, true
+	case config.ConditionFieldTokenized:
+		return in.Tokenized, true
+	case config.ConditionFieldHashSupported:
+		return in.HashSupported, true
+	case config.ConditionFieldHasCandidates:
+		return in.HasCandidates, true
+	default:
+		return nil, false
+	}
+}
+
+func matchesCondition(actual any, cond config.RuleCondition) bool {
+	switch cond.Op {
+	case "", config.ConditionOpEq:
+		return valuesEqual(actual, cond.Value)
+	case config.ConditionOpNeq:
+		return !valuesEqual(actual, cond.Value)
+	case config.ConditionOpIn:
+		return listContains(cond.Value, actual)
+	case config.ConditionOpNotIn:
+		return !listContains(cond.Value, actual)
+	case config.ConditionOpGT, config.ConditionOpGTE, config.ConditionOpLT, config.ConditionOpLTE:
+		return compareNumeric(actual, cond.Value, cond.Op)
+	case config.ConditionOpContains:
+		return strings.Contains(fmt.Sprint(actual), fmt.Sprint(cond.Value))
+	default:
+		return false
+	}
+}
+
+func valuesEqual(a, b any) bool {
+	if af, ok := toFloat(a); ok {
+		if bf, ok := toFloat(b); ok {
+			return af == bf
+		}
+	}
+	if ab, ok := toBool(a); ok {
+		if bb, ok := toBool(b); ok {
+			return ab == bb
+		}
+	}
+	return fmt.Sprint(a) == fmt.Sprint(b)
+}
+
+func compareNumeric(actual, expected any, op string) bool {
+	a, ok := toFloat(actual)
+	if !ok {
+		return false
+	}
+	b, ok := toFloat(expected)
+	if !ok {
+		return false
+	}
+	switch op {
+	case config.ConditionOpGT:
+		return a > b
+	case config.ConditionOpGTE:
+		return a >= b
+	case config.ConditionOpLT:
+		return a < b
+	case config.ConditionOpLTE:
+		return a <= b
+	default:
+		return false
+	}
+}
+
+func listContains(list any, actual any) bool {
+	v := reflect.ValueOf(list)
+	if v.IsValid() && (v.Kind() == reflect.Slice || v.Kind() == reflect.Array) {
+		for i := 0; i < v.Len(); i++ {
+			if valuesEqual(actual, v.Index(i).Interface()) {
+				return true
+			}
+		}
+		return false
+	}
+	return valuesEqual(actual, list)
+}
+
+func toFloat(v any) (float64, bool) {
+	switch x := v.(type) {
+	case int:
+		return float64(x), true
+	case int8:
+		return float64(x), true
+	case int16:
+		return float64(x), true
+	case int32:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case uint:
+		return float64(x), true
+	case uint8:
+		return float64(x), true
+	case uint16:
+		return float64(x), true
+	case uint32:
+		return float64(x), true
+	case uint64:
+		return float64(x), true
+	case float32:
+		return float64(x), true
+	case float64:
+		return x, true
+	case string:
+		f, err := strconv.ParseFloat(x, 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func toBool(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		b, err := strconv.ParseBool(x)
+		return b, err == nil
+	default:
+		return false, false
+	}
 }

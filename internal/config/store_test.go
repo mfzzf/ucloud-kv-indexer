@@ -2,56 +2,46 @@ package config
 
 import "testing"
 
-func ptrInt(i int) *int       { return &i }
-func ptrF(f float64) *float64 { return &f }
-func ptrB(b bool) *bool       { return &b }
-func ptrS(s string) *string   { return &s }
+func ptrB(b bool) *bool { return &b }
 
-func TestEffectivePolicyMergeOrder(t *testing.T) {
+func TestPoliciesSortedByPriority(t *testing.T) {
 	s := NewStore("", nil)
-	// global-ish (no scope) sets threshold 100
-	s.UpsertPolicy(Policy{PolicyID: "g", LongPromptThresholdTokens: ptrInt(100)})
-	// model scope overrides to 200 and sets min hit 0.6
-	s.UpsertPolicy(Policy{PolicyID: "m", Scope: Scope{ModelID: "qwen"},
-		LongPromptThresholdTokens: ptrInt(200), MinHitRatioForLongPrompt: ptrF(0.6)})
-	// tenant+model scope overrides threshold to 300 (most specific)
-	s.UpsertPolicy(Policy{PolicyID: "t", Scope: Scope{ModelID: "qwen", TenantID: "acme"},
-		LongPromptThresholdTokens: ptrInt(300)})
+	s.UpsertPolicy(Policy{RuleID: "b", Priority: 10})
+	s.UpsertPolicy(Policy{RuleID: "a", Priority: 100})
+	s.UpsertPolicy(Policy{RuleID: "c", Priority: 100})
 
-	eff := s.EffectivePolicy("", "qwen", "acme")
-	if eff.LongPromptThresholdTokens != 300 {
-		t.Fatalf("most specific should win threshold=300, got %d", eff.LongPromptThresholdTokens)
+	policies := s.ListPolicies()
+	if len(policies) != 3 {
+		t.Fatalf("want 3 policies, got %+v", policies)
 	}
-	if eff.MinHitRatioForLongPrompt != 0.6 {
-		t.Fatalf("model-scope min hit should survive=0.6, got %v", eff.MinHitRatioForLongPrompt)
-	}
-	// source order: global, model, tenant (plus default at front).
-	if len(eff.SourcePolicyIDs) != 4 {
-		t.Fatalf("expected 4 sources (default+3), got %v", eff.SourcePolicyIDs)
-	}
-	if eff.SourcePolicyIDs[len(eff.SourcePolicyIDs)-1] != "t" {
-		t.Fatalf("tenant policy should be last (highest precedence): %v", eff.SourcePolicyIDs)
+	got := []string{policies[0].RuleID, policies[1].RuleID, policies[2].RuleID}
+	want := []string{"a", "c", "b"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("policies sorted wrong: got %v want %v", got, want)
+		}
 	}
 }
 
-func TestEffectivePolicyScopeFiltering(t *testing.T) {
+func TestPatchPolicy(t *testing.T) {
 	s := NewStore("", nil)
-	s.UpsertPolicy(Policy{PolicyID: "other", Scope: Scope{ModelID: "llama"},
-		LongPromptThresholdTokens: ptrInt(999), Enabled: ptrB(false)})
-	eff := s.EffectivePolicy("", "qwen", "acme")
-	// llama policy must NOT apply to qwen; falls back to default.
-	def := DefaultEffectivePolicy()
-	if eff.LongPromptThresholdTokens != def.LongPromptThresholdTokens {
-		t.Fatalf("non-matching scope must not apply; got %d", eff.LongPromptThresholdTokens)
+	s.UpsertPolicy(Policy{RuleID: "p1", Priority: 1})
+	ok := s.PatchPolicy("p1", func(p *Policy) {
+		p.Name = "patched"
+		p.Priority = 99
+	})
+	if !ok {
+		t.Fatal("patch should find policy")
 	}
-	if !eff.Enabled {
-		t.Fatalf("default should be enabled (other policy must not disable qwen)")
+	policies := s.ListPolicies()
+	if len(policies) != 1 || policies[0].Name != "patched" || policies[0].Priority != 99 {
+		t.Fatalf("patch not applied: %+v", policies)
 	}
 }
 
 func TestRemovePolicy(t *testing.T) {
 	s := NewStore("", nil)
-	s.UpsertPolicy(Policy{PolicyID: "p1", Scope: Scope{ModelID: "qwen"}, Enabled: ptrB(false)})
+	s.UpsertPolicy(Policy{RuleID: "p1", Enabled: ptrB(false)})
 	if !s.RemovePolicy("p1") {
 		t.Fatal("expected existing policy to be removed")
 	}

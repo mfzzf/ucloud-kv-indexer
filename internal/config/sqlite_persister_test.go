@@ -27,7 +27,9 @@ func TestSQLitePersisterRoundTrip(t *testing.T) {
 	st.UpsertEngine(Engine{EngineID: "e1", ClusterID: "h20-1", Framework: FrameworkSGLang,
 		ServedModels: []string{"qwen3"}})
 	enabled := true
-	st.UpsertPolicy(Policy{PolicyID: "p1", Scope: Scope{ModelID: "qwen3"}, Enabled: &enabled})
+	st.UpsertPolicy(Policy{RuleID: "p1",
+		Conditions: []RuleCondition{{Field: ConditionFieldModelID, Op: ConditionOpEq, Value: "qwen3"}},
+		Action:     RuleAction{Type: ActionAccept}, Enabled: &enabled})
 
 	wantVer := st.Version()
 
@@ -56,7 +58,7 @@ func TestSQLitePersisterRoundTrip(t *testing.T) {
 	if !ok || pr.BlockSize != 16 {
 		t.Fatalf("profile not restored: %+v ok=%v", pr, ok)
 	}
-	if ps := st2.ListPolicies(); len(ps) != 1 || ps[0].PolicyID != "p1" {
+	if ps := st2.ListPolicies(); len(ps) != 1 || ps[0].RuleID != "p1" {
 		t.Fatalf("policies not restored: %+v", ps)
 	}
 	// Audit trail should survive too (4 mutations above).

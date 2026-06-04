@@ -136,7 +136,7 @@ func (s *Store) saveSnapshot(ctx context.Context, snap config.Snapshot) error {
 		return err
 	}
 	if err := s.replaceEntityCollection(ctx, "policies", len(snap.Policies), func(i int) (string, any) {
-		return snap.Policies[i].PolicyID, snap.Policies[i]
+		return snap.Policies[i].RuleID, snap.Policies[i]
 	}); err != nil {
 		return err
 	}

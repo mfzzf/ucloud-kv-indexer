@@ -4,7 +4,7 @@ import "testing"
 
 func multiClusterBootstrap() *Bootstrap {
 	enabled := true
-	long := 4096
+	minHit := 0.5
 	return &Bootstrap{
 		Clusters: []BootstrapCluster{
 			{ClusterID: "h20-1", Enabled: &enabled, Backends: []string{"http://10.0.0.1:8090"}},
@@ -22,8 +22,20 @@ func multiClusterBootstrap() *Bootstrap {
 			{EngineID: "sglang-h200-1-0", ClusterID: "h200-1", Framework: "sglang", ServedModels: []string{"qwen3.6"}},
 		},
 		Policies: []BootstrapPolicy{
-			{PolicyID: "global-default", LongPromptThresholdTokens: &long, Enabled: &enabled},
-			{PolicyID: "qwen3.6-long", ScopeModelID: "qwen3.6", LongPromptThresholdTokens: &long, Enabled: &enabled},
+			{
+				RuleID:  "global-default",
+				Action:  RuleAction{Type: ActionAccept},
+				Enabled: &enabled,
+			},
+			{
+				RuleID: "qwen3.6-long",
+				Conditions: []RuleCondition{
+					{Field: ConditionFieldModelID, Op: ConditionOpEq, Value: "qwen3.6"},
+					{Field: ConditionFieldInputTokens, Op: ConditionOpGTE, Value: 4096},
+				},
+				Action:  RuleAction{Type: ActionRequireCacheHit, MinHitRatio: &minHit},
+				Enabled: &enabled,
+			},
 		},
 	}
 }
@@ -72,7 +84,7 @@ func TestApplyBootstrapScopedToCluster(t *testing.T) {
 	// global-default (no scope) is kept; qwen3.6-long (scopes a non-served model)
 	// is dropped under this cluster.
 	pols := st.ListPolicies()
-	if len(pols) != 1 || pols[0].PolicyID != "global-default" {
+	if len(pols) != 1 || pols[0].RuleID != "global-default" {
 		t.Fatalf("scoped policies wrong: %+v", pols)
 	}
 }

@@ -52,7 +52,7 @@ func TestStorePersistsEveryMutation(t *testing.T) {
 	st := NewStoreWith(m, nil)
 	st.UpsertCluster(Cluster{ClusterID: "c1"})
 	st.UpsertEngine(Engine{EngineID: "e1"})
-	st.UpsertPolicy(Policy{PolicyID: "p1"})
+	st.UpsertPolicy(Policy{RuleID: "p1"})
 	if m.saves != 3 {
 		t.Fatalf("want 3 saves, got %d", m.saves)
 	}
@@ -63,15 +63,15 @@ func TestStorePersistsEveryMutation(t *testing.T) {
 
 func TestApplyBootstrapOnceOnly(t *testing.T) {
 	enabled := true
-	long := 1024
 	bs := &Bootstrap{
 		Cluster: BootstrapCluster{ClusterID: "gz", Region: "cn-guangzhou", Enabled: &enabled},
 		Profiles: []BootstrapProfile{{ModelID: "qwen3.5-4b", Framework: "sglang",
 			HashProfile: "sglang-v1-text", BlockSize: 1, HashSeed: "0"}},
 		Engines: []BootstrapEngine{{EngineID: "e0", ClusterID: "gz", Framework: "sglang",
 			ServedModels: []string{"qwen3.5-4b"}}},
-		Policies: []BootstrapPolicy{{PolicyID: "gz-default", ScopeModelID: "qwen3.5-4b",
-			LongPromptThresholdTokens: &long, Enabled: &enabled}},
+		Policies: []BootstrapPolicy{{RuleID: "gz-default",
+			Conditions: []RuleCondition{{Field: ConditionFieldModelID, Op: ConditionOpEq, Value: "qwen3.5-4b"}},
+			Action:     RuleAction{Type: ActionAccept}, Enabled: &enabled}},
 	}
 
 	st := NewStoreWith(nil, nil)

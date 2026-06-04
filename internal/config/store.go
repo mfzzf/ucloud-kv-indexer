@@ -272,8 +272,8 @@ func (s *Store) UpsertPolicy(p Policy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := p
-	s.policies[p.PolicyID] = &cp
-	s.bump(AuditEntry{Action: "upsert", Entity: "policy", EntityID: p.PolicyID})
+	s.policies[p.RuleID] = &cp
+	s.bump(AuditEntry{Action: "upsert", Entity: "policy", EntityID: p.RuleID})
 	s.persistLocked()
 }
 
@@ -294,9 +294,12 @@ func (s *Store) ListPolicies() []Policy {
 	defer s.mu.RUnlock()
 	out := make([]Policy, 0, len(s.policies))
 	for _, p := range s.policies {
+		if p.RuleID == "" {
+			continue
+		}
 		out = append(out, *p)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].PolicyID < out[j].PolicyID })
+	sortPolicies(out)
 	return out
 }
 
@@ -313,98 +316,13 @@ func (s *Store) PatchPolicy(id string, fn func(*Policy)) bool {
 	return true
 }
 
-// specificity scores a scope: more specific (more fields set) = higher.
-func specificity(sc Scope) int {
-	n := 0
-	if sc.ClusterID != "" {
-		n += 1
-	}
-	if sc.ModelID != "" {
-		n += 2
-	}
-	if sc.TenantID != "" {
-		n += 4
-	}
-	return n
-}
-
-// matches reports whether a policy scope applies to the given dimensions.
-// Empty scope fields are wildcards.
-func (sc Scope) matches(cluster, model, tenant string) bool {
-	if sc.ClusterID != "" && sc.ClusterID != cluster {
-		return false
-	}
-	if sc.ModelID != "" && sc.ModelID != model {
-		return false
-	}
-	if sc.TenantID != "" && sc.TenantID != tenant {
-		return false
-	}
-	return true
-}
-
-// EffectivePolicy merges all matching policies over the global default, from
-// least to most specific. Each non-nil field overrides. Returns the resolved
-// policy and the ordered list of contributing policy IDs.
-func (s *Store) EffectivePolicy(cluster, model, tenant string) EffectivePolicy {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	eff := DefaultEffectivePolicy()
-
-	var matched []*Policy
-	for _, p := range s.policies {
-		if p.Scope.matches(cluster, model, tenant) {
-			matched = append(matched, p)
+func sortPolicies(policies []Policy) {
+	sort.Slice(policies, func(i, j int) bool {
+		if policies[i].Priority != policies[j].Priority {
+			return policies[i].Priority > policies[j].Priority
 		}
-	}
-	// Sort ascending by specificity; ties broken by policy ID for determinism.
-	sort.Slice(matched, func(i, j int) bool {
-		si, sj := specificity(matched[i].Scope), specificity(matched[j].Scope)
-		if si != sj {
-			return si < sj
-		}
-		return matched[i].PolicyID < matched[j].PolicyID
+		return policies[i].RuleID < policies[j].RuleID
 	})
-
-	for _, p := range matched {
-		applyOverride(&eff, p)
-		eff.SourcePolicyIDs = append(eff.SourcePolicyIDs, p.PolicyID)
-	}
-	return eff
-}
-
-func applyOverride(eff *EffectivePolicy, p *Policy) {
-	if p.LongPromptThresholdTokens != nil {
-		eff.LongPromptThresholdTokens = *p.LongPromptThresholdTokens
-	}
-	if p.HardLongPromptThresholdTokens != nil {
-		eff.HardLongPromptThresholdTokens = *p.HardLongPromptThresholdTokens
-	}
-	if p.MinHitRatioForLongPrompt != nil {
-		eff.MinHitRatioForLongPrompt = *p.MinHitRatioForLongPrompt
-	}
-	if p.EventFreshnessTTLMs != nil {
-		eff.EventFreshnessTTLMs = *p.EventFreshnessTTLMs
-	}
-	if p.StaleEventBehavior != nil {
-		eff.StaleEventBehavior = *p.StaleEventBehavior
-	}
-	if p.LowHitRejectStatus != nil {
-		eff.LowHitRejectStatus = *p.LowHitRejectStatus
-	}
-	if p.GPUHitWeight != nil {
-		eff.GPUHitWeight = *p.GPUHitWeight
-	}
-	if p.CPUHitWeight != nil {
-		eff.CPUHitWeight = *p.CPUHitWeight
-	}
-	if p.DiskHitWeight != nil {
-		eff.DiskHitWeight = *p.DiskHitWeight
-	}
-	if p.Enabled != nil {
-		eff.Enabled = *p.Enabled
-	}
 }
 
 // ---- Audit ----
@@ -494,6 +412,9 @@ func (s *Store) applySnapshot(snap Snapshot) {
 		s.profiles[p.ModelID] = p
 	}
 	for _, p := range snap.Policies {
-		s.policies[p.PolicyID] = p
+		if p.RuleID == "" {
+			continue
+		}
+		s.policies[p.RuleID] = p
 	}
 }

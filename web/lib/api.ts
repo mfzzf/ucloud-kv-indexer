@@ -104,35 +104,46 @@ export interface ModelProfile {
   _backend?: string;
 }
 
+export interface RuleCondition {
+  field: string;
+  op: string;
+  value?: string | number | boolean | Array<string | number | boolean>;
+}
+
+export interface RuleAction {
+  type: "accept" | "reject" | "require_cache_hit" | string;
+  min_hit_ratio?: number;
+  on_low_hit?: "accept" | "reject" | "fallback_accept" | string;
+  on_uncertain?: "accept" | "reject" | "fallback_accept" | string;
+  reject_status?: number;
+}
+
 export interface Policy {
-  policy_id: string;
-  scope: { cluster_id?: string; model_id?: string; tenant_id?: string };
-  long_prompt_threshold_tokens?: number;
-  hard_long_prompt_threshold_tokens?: number;
-  min_hit_ratio_for_long_prompt?: number;
-  event_freshness_ttl_ms?: number;
-  stale_event_behavior?: string;
-  low_hit_reject_status?: number;
-  gpu_hit_weight?: number;
-  cpu_hit_weight?: number;
-  disk_hit_weight?: number;
+  rule_id: string;
+  name?: string;
+  priority: number;
+  conditions?: RuleCondition[];
+  action: RuleAction;
   enabled?: boolean;
   _cluster?: string;
   _backend?: string;
 }
 
-export interface EffectivePolicy {
-  long_prompt_threshold_tokens: number;
-  hard_long_prompt_threshold_tokens: number;
-  min_hit_ratio_for_long_prompt: number;
-  event_freshness_ttl_ms: number;
-  stale_event_behavior: string;
-  low_hit_reject_status: number;
-  gpu_hit_weight: number;
-  cpu_hit_weight: number;
-  disk_hit_weight: number;
-  enabled: boolean;
-  source_policy_ids: string[];
+export interface AdmissionResult {
+  decision: string;
+  reason: string;
+  http_status: number;
+  fallback: boolean;
+  min_required_hit_ratio: number;
+  matched_rule_id?: string;
+  matched_rule_name?: string;
+  matched_rule_priority?: number;
+  evaluated_rule_ids?: string[];
+}
+
+export interface PolicyPreview {
+  rules: Policy[];
+  result: AdmissionResult;
 }
 
 export interface StreamHealth {
@@ -280,11 +291,15 @@ export interface TokenizePreview {
 export interface RouteResponse {
   decision: string;
   reason: string;
+  http_status: number;
   target?: { cluster_id?: string; engine_id: string; endpoint?: string; dp_rank: number };
   config: {
     model_profile_version: number;
     namespace: string;
-    effective_policy_ids: string[];
+    evaluated_rule_ids?: string[];
+    matched_rule_id?: string;
+    matched_rule_name?: string;
+    matched_rule_priority?: number;
     config_version: number;
   };
   cache: {

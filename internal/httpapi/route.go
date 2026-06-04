@@ -33,13 +33,14 @@ type RouteRecord struct {
 
 // RouteResponse is the /route response body.
 type RouteResponse struct {
-	Decision admission.Decision `json:"decision"`
-	Reason   admission.Reason   `json:"reason"`
-	Target   *Target            `json:"target,omitempty"`
-	Config   ConfigInfo         `json:"config"`
-	Cache    admission.HitInfo  `json:"cache"`
-	Fallback bool               `json:"fallback"`
-	Protocol types.Protocol     `json:"protocol"`
+	Decision   admission.Decision `json:"decision"`
+	Reason     admission.Reason   `json:"reason"`
+	HTTPStatus int                `json:"http_status"`
+	Target     *Target            `json:"target,omitempty"`
+	Config     ConfigInfo         `json:"config"`
+	Cache      admission.HitInfo  `json:"cache"`
+	Fallback   bool               `json:"fallback"`
+	Protocol   types.Protocol     `json:"protocol"`
 	// Error is populated only on reject (429).
 	Error *RejectError `json:"error,omitempty"`
 }
@@ -57,7 +58,10 @@ type Target struct {
 type ConfigInfo struct {
 	ModelProfileVersion int      `json:"model_profile_version"`
 	Namespace           string   `json:"namespace"`
-	EffectivePolicyIDs  []string `json:"effective_policy_ids"`
+	EvaluatedRuleIDs    []string `json:"evaluated_rule_ids"`
+	MatchedRuleID       string   `json:"matched_rule_id,omitempty"`
+	MatchedRuleName     string   `json:"matched_rule_name,omitempty"`
+	MatchedRulePriority int      `json:"matched_rule_priority,omitempty"`
 	ConfigVersion       int      `json:"config_version"`
 }
 
@@ -125,17 +129,10 @@ func (s *Service) normalizeRequest(proto types.Protocol, body []byte) (*types.Ro
 }
 
 func (rr RouteResponse) toHTTPStatus() int {
-	if rr.Decision == admission.DecisionReject {
-		if rr.Error != nil && rr.Cache.InputTokens >= 0 {
-			// reject uses the policy status
-		}
-		return statusForReject(rr.Reason)
+	if rr.HTTPStatus > 0 {
+		return rr.HTTPStatus
 	}
 	return http.StatusOK
-}
-
-func statusForReject(reason admission.Reason) int {
-	return http.StatusTooManyRequests // 429 for all current reject reasons
 }
 
 // evaluate runs the full pipeline and returns a response (also records it).
@@ -151,21 +148,21 @@ func (s *Service) evaluate(ctx context.Context, rr *types.RouteRequest) RouteRes
 	if len(engines) > 0 {
 		clusterID = engines[0].ClusterID
 	}
-	eff := s.Store.EffectivePolicy(clusterID, rr.Model, tenant)
+	rules := s.Store.ListPolicies()
 
 	resp := RouteResponse{Protocol: rr.Protocol}
 	resp.Config = ConfigInfo{
-		EffectivePolicyIDs: eff.SourcePolicyIDs,
-		ConfigVersion:      s.Store.Version(),
+		ConfigVersion: s.Store.Version(),
 	}
 
 	// If no profile is configured we cannot tokenize/hash; fall back to accept
 	// (never 429 under uncertainty).
 	if !hasProfile {
-		in := admission.Input{InputTokens: 0, BlockSize: 16, Policy: eff,
+		in := admission.Input{ClusterID: clusterID, ModelID: rr.Model, TenantID: tenant,
+			InputTokens: 0, BlockSize: 16, Rules: rules,
 			Tokenized: false, HashSupported: true, Fresh: false, HasCandidates: len(engines) > 0}
 		ar := admission.Evaluate(in)
-		return s.finish(rr, resp, ar, eff, prof, "", engines)
+		return s.finish(rr, resp, ar, prof, "", engines)
 	}
 	resp.Config.ModelProfileVersion = prof.Version
 	ns := prof.Namespace()
@@ -203,9 +200,12 @@ func (s *Service) evaluate(ctx context.Context, rr *types.RouteRequest) RouteRes
 	}
 
 	in := admission.Input{
+		ClusterID:     clusterID,
+		ModelID:       rr.Model,
+		TenantID:      tenant,
 		InputTokens:   inputTokens,
 		BlockSize:     blockSize,
-		Policy:        eff,
+		Rules:         rules,
 		Query:         query,
 		Fresh:         fresh,
 		Tokenized:     tokenized,
@@ -213,14 +213,19 @@ func (s *Service) evaluate(ctx context.Context, rr *types.RouteRequest) RouteRes
 		HasCandidates: len(engines) > 0,
 	}
 	ar := admission.Evaluate(in)
-	return s.finish(rr, resp, ar, eff, prof, ns, engines)
+	return s.finish(rr, resp, ar, prof, ns, engines)
 }
 
-func (s *Service) finish(rr *types.RouteRequest, resp RouteResponse, ar admission.Result, eff config.EffectivePolicy, prof config.ModelProfile, ns string, engines []config.Engine) RouteResponse {
+func (s *Service) finish(rr *types.RouteRequest, resp RouteResponse, ar admission.Result, prof config.ModelProfile, ns string, engines []config.Engine) RouteResponse {
 	resp.Decision = ar.Decision
 	resp.Reason = ar.Reason
+	resp.HTTPStatus = ar.HTTPStatus
 	resp.Cache = ar.Hit
 	resp.Fallback = ar.Fallback
+	resp.Config.EvaluatedRuleIDs = ar.EvaluatedRuleIDs
+	resp.Config.MatchedRuleID = ar.MatchedRuleID
+	resp.Config.MatchedRuleName = ar.MatchedRuleName
+	resp.Config.MatchedRulePriority = ar.MatchedRulePriority
 
 	if ar.Decision == admission.DecisionReject {
 		resp.Error = &RejectError{

@@ -107,7 +107,7 @@ func (p *SQLitePersister) Save(snap Snapshot) {
 		return
 	}
 	if !insertJSONRows(tx, "policies", len(snap.Policies), func(i int) (string, any) {
-		return snap.Policies[i].PolicyID, snap.Policies[i]
+		return snap.Policies[i].RuleID, snap.Policies[i]
 	}) {
 		return
 	}

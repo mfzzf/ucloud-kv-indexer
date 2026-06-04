@@ -373,7 +373,9 @@ function DecisionCard({ r }: { r: RouteResponse }) {
           {t("sim.dec.profile", {
             p: r.config.model_profile_version,
             c: r.config.config_version,
-            ids: r.config.effective_policy_ids?.join(" → ") ?? "",
+            ids: r.config.matched_rule_id
+              ? `${r.config.matched_rule_id}`
+              : (r.config.evaluated_rule_ids?.join(" → ") ?? ""),
           })}
         </div>
       </CardContent>

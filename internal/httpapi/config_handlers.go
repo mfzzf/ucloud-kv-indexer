@@ -178,8 +178,8 @@ func (s *Service) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if p.PolicyID == "" {
-		writeErr(w, http.StatusBadRequest, "policy_id required")
+	if p.RuleID == "" {
+		writeErr(w, http.StatusBadRequest, "rule_id required")
 		return
 	}
 	s.Store.UpsertPolicy(p)
@@ -188,47 +188,19 @@ func (s *Service) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handlePatchPolicy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	// Patch by full replacement of provided fields: decode into a Policy and
-	// copy non-nil pointer fields.
+	// Patch is a full replacement of editable rule fields. The path id remains
+	// authoritative, so callers cannot rename a rule through PATCH.
 	var p config.Policy
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	ok := s.Store.PatchPolicy(id, func(dst *config.Policy) {
-		if p.Scope != (config.Scope{}) {
-			dst.Scope = p.Scope
-		}
-		if p.LongPromptThresholdTokens != nil {
-			dst.LongPromptThresholdTokens = p.LongPromptThresholdTokens
-		}
-		if p.HardLongPromptThresholdTokens != nil {
-			dst.HardLongPromptThresholdTokens = p.HardLongPromptThresholdTokens
-		}
-		if p.MinHitRatioForLongPrompt != nil {
-			dst.MinHitRatioForLongPrompt = p.MinHitRatioForLongPrompt
-		}
-		if p.EventFreshnessTTLMs != nil {
-			dst.EventFreshnessTTLMs = p.EventFreshnessTTLMs
-		}
-		if p.StaleEventBehavior != nil {
-			dst.StaleEventBehavior = p.StaleEventBehavior
-		}
-		if p.LowHitRejectStatus != nil {
-			dst.LowHitRejectStatus = p.LowHitRejectStatus
-		}
-		if p.GPUHitWeight != nil {
-			dst.GPUHitWeight = p.GPUHitWeight
-		}
-		if p.CPUHitWeight != nil {
-			dst.CPUHitWeight = p.CPUHitWeight
-		}
-		if p.DiskHitWeight != nil {
-			dst.DiskHitWeight = p.DiskHitWeight
-		}
-		if p.Enabled != nil {
-			dst.Enabled = p.Enabled
-		}
+		dst.Name = p.Name
+		dst.Priority = p.Priority
+		dst.Conditions = p.Conditions
+		dst.Action = p.Action
+		dst.Enabled = p.Enabled
 	})
 	if !ok {
 		writeErr(w, http.StatusNotFound, "policy not found")

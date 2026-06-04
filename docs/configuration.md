@@ -91,19 +91,26 @@ report.
 
 ### `policies[]` — `BootstrapPolicy`
 
-Policies are **cross-cluster** (scoped by cluster/model/tenant), so they live at the top
-level, not nested. The effective policy for a request is the merge of all matching scopes
-(most-specific wins); preview it via `/config/effective-policy/preview`.
+Policies are **priority rules**, so they live at the top level, not nested under
+clusters. Conditions inside a rule are combined with AND. Rules are evaluated as
+an OR list by priority: the first enabled rule whose conditions all match wins.
+Preview rule matching via `/config/effective-policy/preview`.
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `policy_id` | string (required) | |
-| `scope_cluster_id` / `scope_model_id` / `scope_tenant_id` | string | Empty = matches all. |
-| `long_prompt_threshold_tokens` | int | Below this → always accept (ordinary prompt). |
-| `hard_long_prompt_threshold_tokens` | int | Above this → 429 (capacity), regardless of hit. |
-| `min_hit_ratio_for_long_prompt` | float | A long prompt below this hit ratio → 429 `long_prompt_low_cache_hit`. |
-| `event_freshness_ttl_ms` | int | A stream silent longer than this is "stale" → fallback-accept (never low-hit 429). |
-| `enabled` | bool | |
+| `rule_id` | string (required) | Stable id used by API update/delete paths. |
+| `name` | string | Human-readable label. |
+| `priority` | int | Higher values match first. |
+| `conditions[]` | list | AND clauses. Empty = match every request. |
+| `conditions[].field` | string | e.g. `cluster_id`, `model_id`, `tenant_id`, `input_tokens`, `hit_ratio`, `kv_event_state`. |
+| `conditions[].op` | string | `eq`, `neq`, `in`, `not_in`, `gt`, `gte`, `lt`, `lte`, `contains`. |
+| `conditions[].value` | scalar/list | Comparison value. |
+| `action.type` | string | `accept`, `reject`, or `require_cache_hit`. |
+| `action.min_hit_ratio` | float | Required when `type=require_cache_hit`; `0.5` means 50%. |
+| `action.on_low_hit` | string | `reject`, `accept`, or `fallback_accept`. |
+| `action.on_uncertain` | string | Used when tokenization/hash/events/candidates are not trustworthy. |
+| `action.reject_status` | int | Defaults to 429. |
+| `enabled` | bool | Omitted means enabled. |
 
 ---
 
@@ -131,11 +138,22 @@ clusters:
         dp_ranks: 1
         max_model_len: 8192
 policies:
-  - policy_id: local-default
-    long_prompt_threshold_tokens: 256
-    hard_long_prompt_threshold_tokens: 7168
-    min_hit_ratio_for_long_prompt: 0.5
-    event_freshness_ttl_ms: 5000
+  - rule_id: local-vllm-cache-gate
+    name: 256 Token 以上要求 KV 命中
+    priority: 100
+    conditions:
+      - field: cluster_id
+        op: eq
+        value: local-vllm
+      - field: input_tokens
+        op: gte
+        value: 256
+    action:
+      type: require_cache_hit
+      min_hit_ratio: 0.5
+      on_low_hit: reject
+      on_uncertain: fallback_accept
+      reject_status: 429
     enabled: true
 ```
 
