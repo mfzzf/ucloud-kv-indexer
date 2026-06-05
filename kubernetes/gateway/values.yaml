@@ -1,0 +1,85 @@
+namespace:
+  create: true
+  name: ucloud-kv-gateway
+
+image:
+  repository: uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer
+  tag: latest
+  pullPolicy: IfNotPresent
+
+secrets:
+  create: true
+  name: kvgateway-secrets
+  backendToken: 70982fdbbb8dc83145eda4b7fb99e55b0be74c0682c4f09c0b406112c10ae002
+  mysqlDSN: kvgateway:c96114509ac233042025ff94d21a8b04d5e648fa461a082e565df90a7f7e4022@tcp(mysql.external.example.com:3306)/kvgateway?parseTime=true
+
+bootstrap:
+  enabled: true
+  configMapName: kvgateway-bootstrap
+  files:
+    cn-shanghai-vllm.yaml: |
+      clusters:
+        - cluster_id: cn-shanghai-vllm
+          display_name: cn-shanghai vLLM Qwen3.5-4B
+          region: cn-shanghai
+          environment: prod
+          enabled: true
+          framework: vllm
+          backends:
+            - http://kvindexer-vllm-cn-shanghai.internal.example.com:8090
+          models:
+            - model_id: qwen3.5-4b
+              block_size: 528
+              hash_seed: "0"
+              tokenizer_endpoint: http://vllm.cn-shanghai.svc.cluster.local:8000
+          engines:
+            - engine_id: vllm-cn-shanghai-0
+              api_endpoint: http://vllm.cn-shanghai.svc.cluster.local:8000
+              tokenizer_endpoint: http://vllm.cn-shanghai.svc.cluster.local:8000
+              kv_event_endpoint: tcp://vllm.cn-shanghai.svc.cluster.local:5559
+              replay_endpoint: tcp://vllm.cn-shanghai.svc.cluster.local:5560
+              topic: kv-events
+              served_models: [qwen3.5-4b]
+              dp_ranks: 1
+              max_model_len: 65536
+    cn-guangzhou-sglang.yaml: |
+      clusters:
+        - cluster_id: cn-guangzhou-sglang
+          display_name: cn-guangzhou SGLang Qwen3-0.6B
+          region: cn-guangzhou
+          environment: prod
+          enabled: true
+          framework: sglang
+          backends:
+            - http://kvindexer-sglang-cn-guangzhou.internal.example.com:8090
+          models:
+            - model_id: qwen3-0.6b
+              block_size: 64
+              hash_seed: "0"
+              tokenizer_endpoint: http://sglang.cn-guangzhou.svc.cluster.local:30000
+          engines:
+            - engine_id: sglang-cn-guangzhou-0
+              api_endpoint: http://sglang.cn-guangzhou.svc.cluster.local:30000
+              tokenizer_endpoint: http://sglang.cn-guangzhou.svc.cluster.local:30000
+              kv_event_endpoint: tcp://sglang.cn-guangzhou.svc.cluster.local:5557
+              replay_endpoint: tcp://sglang.cn-guangzhou.svc.cluster.local:5558
+              topic: kv-events
+              served_models: [qwen3-0.6b]
+              dp_ranks: 1
+              max_model_len: 8192
+
+gateway:
+  name: kvgateway
+  replicas: 2
+  listenAddress: ":8095"
+  port: 8095
+  store: mysql
+  configFiles:
+    - cn-shanghai-vllm.yaml
+    - cn-guangzhou-sglang.yaml
+  service:
+    type: ClusterIP
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

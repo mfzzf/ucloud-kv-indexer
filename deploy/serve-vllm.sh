@@ -7,6 +7,7 @@
 #   HTTP API + tokenizer : http://0.0.0.0:8000     (--host 0.0.0.0)
 #   KV events (ZMQ PUB)  : tcp://*:5559            (kvindexer connects to :5559)
 #   KV events replay     : tcp://127.0.0.1:5560    (ROUTER, gap recovery)
+#   Mooncake owner       : 127.0.0.1:50052          (CPU/disk KV store)
 #
 # WHY the PUB endpoint is tcp://*:5559 and not tcp://127.0.0.1:5559:
 # vLLM's ZmqEventPublisher (vllm/distributed/kv_events.py) BINDS the PUB socket
@@ -31,6 +32,11 @@ VENV="$ROOT/.venv-vllm"
 source "$VENV/bin/activate"
 export LD_LIBRARY_PATH="$VENV/lib/python3.11/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
 export PYTHONHASHSEED=0   # stable namespace hashing across restarts
+export MOONCAKE_CONFIG_PATH="$ROOT/runtime/mooncake-vllm-qwen35-4b.json"
+export MOONCAKE_PREFERRED_SEGMENT="${MOONCAKE_PREFERRED_SEGMENT:-127.0.0.1:50052}"
+export MOONCAKE_REQUESTER_LOCAL_HOSTNAME="${MOONCAKE_REQUESTER_LOCAL_HOSTNAME:-127.0.0.1}"
+export VLLM_MOONCAKE_STORE_TIER_LOG=1
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 exec vllm serve "$MODEL" \
   --served-model-name qwen3.5-4b \
@@ -38,9 +44,12 @@ exec vllm serve "$MODEL" \
   --port 8000 \
   --trust-remote-code \
   --dtype bfloat16 \
-  --max-model-len 8192 \
+  --max-model-len 65536 \
   --gpu-memory-utilization 0.60 \
   --max-num-seqs 4 \
   --enable-prefix-caching \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_xml \
   --mamba-cache-mode align \
-  --kv-events-config '{"publisher":"zmq","enable_kv_cache_events":true,"endpoint":"tcp://*:5559","topic":"kv-events","replay_endpoint":"tcp://127.0.0.1:5560"}'
+  --kv-events-config '{"publisher":"zmq","enable_kv_cache_events":true,"endpoint":"tcp://*:5559","topic":"kv-events","replay_endpoint":"tcp://127.0.0.1:5560"}' \
+  --kv-transfer-config '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both"}'

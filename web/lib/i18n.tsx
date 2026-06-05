@@ -225,6 +225,7 @@ const en: Dict = {
   "policies.col.enabled": "Status",
   "policies.col.priority": "Priority",
   "policies.col.name": "Name",
+  "policies.col.scope_cluster": "Applies to cluster",
   "policies.col.conditions": "Conditions",
   "policies.col.action": "Action",
   "policies.col.uncertain": "Uncertain",
@@ -267,6 +268,11 @@ const en: Dict = {
   "policies.field.ttl": "KV event max age (ms)",
   "policies.btn.save": "Save rule",
   "policies.btn.add_condition": "Add condition",
+  "policies.storage_cluster": "stored on {cluster}",
+  "policies.scope_cluster.desc":
+    "Choosing a cluster writes a cluster_id = value condition. Any means this rule has no cluster condition.",
+  "policies.error.target_cluster_required":
+    "Choose an applicable cluster, or switch the top-right cluster selector to one concrete cluster before saving.",
   "policies.help.rule_id":
     "A stable id for this rule. It is used in audit records, API responses, and update/delete paths.",
   "policies.help.name":
@@ -274,7 +280,7 @@ const en: Dict = {
   "policies.help.priority":
     "Higher priority rules run first. Once a rule matches, lower-priority rules are not evaluated.",
   "policies.help.cluster":
-    "The kv-indexer cluster this rule applies to, for example local-vllm or local-sglang. Empty means all clusters handled by this backend.",
+    "The request cluster_id this rule matches. Choosing local-vllm means only local-vllm admission requests can match this rule; Any leaves the rule unscoped by cluster.",
   "policies.help.scope":
     "Which requests this rule matches. Empty model, tenant, and cluster means the global default rule.",
   "policies.help.model":
@@ -321,7 +327,7 @@ const en: Dict = {
     "Rules considered in priority order until the first match.",
   "policies.form.conditions": "Match conditions",
   "policies.form.conditions_desc":
-    "Checked conditions are combined with AND. Separate rules are OR by priority.",
+    "These conditions are ANDed with the cluster scope above. Separate rules are OR by priority.",
   "policies.form.action": "Action",
   "policies.conditions.all": "all requests",
   "policies.conditions.all_desc":
@@ -385,6 +391,9 @@ const en: Dict = {
   "streams.events.query": "Query KV events",
   "streams.events.detail": "KV event details",
   "streams.events.empty": "No KV events observed yet.",
+  "streams.events.empty_filtered": "No KV events match the current filter.",
+  "streams.events.filter.indexed": "Indexed",
+  "streams.events.filter.all": "All",
   "streams.events.page_info": "Page {page}/{pages} · {total} events · 10 per page",
   "streams.events.col.time": "Observed",
   "streams.events.col.kind": "Kind",
@@ -696,6 +705,7 @@ const zh: Dict = {
   "policies.col.enabled": "状态",
   "policies.col.priority": "优先级",
   "policies.col.name": "名称",
+  "policies.col.scope_cluster": "适用集群",
   "policies.col.conditions": "匹配条件",
   "policies.col.action": "动作",
   "policies.col.uncertain": "信号不确定",
@@ -737,6 +747,11 @@ const zh: Dict = {
   "policies.field.ttl": "KV 事件有效期 (ms)",
   "policies.btn.save": "保存规则",
   "policies.btn.add_condition": "添加条件",
+  "policies.storage_cluster": "存储: {cluster}",
+  "policies.scope_cluster.desc":
+    "选择集群会写入 cluster_id = 当前值的匹配条件；选择任意则不按集群限制。",
+  "policies.error.target_cluster_required":
+    "请先选择适用集群，或把右上角集群切换到某一个具体集群后再保存。",
   "policies.help.rule_id":
     "这条规则的稳定 ID，用于配置审计、API 响应以及更新/删除路径。",
   "policies.help.name":
@@ -744,7 +759,7 @@ const zh: Dict = {
   "policies.help.priority":
     "数值越大越先执行。一条规则命中后，后续低优先级规则不会再判断。",
   "policies.help.cluster":
-    "这条规则适用的 kv-indexer 集群，例如 local-vllm 或 local-sglang。留空表示当前后端里的所有集群。",
+    "这条规则匹配请求里的 cluster_id。选择 local-vllm 就只有 local-vllm 的准入请求能命中；选择任意则不按集群限制。",
   "policies.help.scope":
     "这条规则匹配哪些请求。模型、租户和集群都留空时，就是全局默认规则。",
   "policies.help.model":
@@ -791,7 +806,7 @@ const zh: Dict = {
     "按优先级依次检查过的规则，直到命中第一条为止。",
   "policies.form.conditions": "匹配条件",
   "policies.form.conditions_desc":
-    "同一条规则内条件按 AND 组合。不同规则之间按优先级 OR 命中。",
+    "这些条件会和上面的适用集群一起按 AND 匹配。不同规则之间按优先级 OR 命中。",
   "policies.form.action": "执行动作",
   "policies.conditions.all": "全部请求",
   "policies.conditions.all_desc": "没有条件时，这条规则会匹配所有请求。",
@@ -853,6 +868,9 @@ const zh: Dict = {
   "streams.events.query": "查询 KV 事件",
   "streams.events.detail": "KV 事件详情",
   "streams.events.empty": "尚未观察到 KV 事件。",
+  "streams.events.empty_filtered": "当前筛选条件下没有 KV 事件。",
+  "streams.events.filter.indexed": "已入索引",
+  "streams.events.filter.all": "全部",
   "streams.events.page_info": "第 {page}/{pages} 页 · 共 {total} 条 · 每页 10 条",
   "streams.events.col.time": "接收时间",
   "streams.events.col.kind": "类型",

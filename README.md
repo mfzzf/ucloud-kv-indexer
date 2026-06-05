@@ -53,7 +53,7 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
                             └──────────────┬───────────────┘
                             ┌──────────────────────────────┐
                             │  kvgateway  :8095            │   federation + config authority
-                            │  (fan-out reads, proxy writes)│   SQLite connection registry
+                            │  (fan-out reads, proxy writes)│   SQL connection registry
                             │   ── never touches ZMQ ──     │   (which kvindexers + tokens)
                             └───────┬──────────────┬────────┘
               ?cluster= +Bearer tok │              │ ?cluster= +Bearer tok
@@ -79,8 +79,9 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
   `sqlite`, or `mongo`; local dev uses `-store mongo` so frontend policy edits survive
   restart.
 - **kvgateway** — the federation layer **and** the connection authority. It owns a
-  **SQLite connection registry** (which kvindexers exist, their URLs, and their bearer
-  tokens), seeded once from one or more YAML files and editable live via
+  **SQL connection registry** (SQLite for local dev, MySQL for Kubernetes/production)
+  listing which kvindexers exist, their URLs, and their bearer tokens. It is seeded once
+  from one or more YAML files and editable live via
   `/admin/connections`. It fans GET
   lists out to every cluster's kvindexer (tagging each row with `_cluster`/`_backend`),
   proxies writes/queries to one backend selected by `?cluster=`, and **attaches the bearer
@@ -103,7 +104,7 @@ internal/
   residency/    dual-key prefix index (request_key + engine_key bridge) + manager
   kvevents/     msgpack decoder + pure-Go ZMQ listener (go-zeromq/zmq4) + bounded apply queue
   admission/    the length + cache-hit-rate judgment
-  gateway/      multi-cluster HTTP federation + SQLite connection registry (cmd/kvgateway)
+  gateway/      multi-cluster HTTP federation + SQL connection registry (cmd/kvgateway)
   httpapi/      service wiring + HTTP handlers + bearer auth + CORS (cmd/kvindexer)
 cmd/kvindexer/  per-cluster admission service
 cmd/kvgateway/  federation gateway + connection registry
@@ -275,10 +276,12 @@ Other store modes remain available:
   survive restart). Use for a standalone kvindexer with no gateway.
 - **file** — `-config data/config.json`, a single JSON snapshot.
 
-The **gateway** owns the connection registry in **SQLite** (`-sqlite-path`): the list of
-kvindexers (`{id, cluster, url, token, enabled}`), seeded once from YAML
-(`-config` or comma-separated `-configs`) with the shared `-backend-token`, then
-authoritative and editable live via
+The **gateway** owns the connection registry in **SQLite** for local dev
+(`-store sqlite -sqlite-path ...`) or **MySQL** for shared deployments
+(`-store mysql -mysql-dsn ...`): the list of kvindexers
+(`{id, cluster, url, token, enabled}`), seeded once from YAML (`-config` or
+comma-separated `-configs`) with the shared `-backend-token`, then authoritative and
+editable live via
 `/admin/connections` (`GET` / `POST` / `DELETE /admin/connections/{id}`).
 
 ---

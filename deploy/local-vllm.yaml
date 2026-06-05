@@ -22,7 +22,7 @@ clusters:
         topic: kv-events
         served_models: [qwen3.5-4b]
         dp_ranks: 1
-        max_model_len: 8192
+        max_model_len: 65536
 
 policies:
   - rule_id: local-vllm-cache-gate

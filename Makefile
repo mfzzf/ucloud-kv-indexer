@@ -13,7 +13,8 @@
 # Inference engines are managed SEPARATELY — `make inference` starts them,
 # `make down` NEVER stops them. Each kvindexer has its OWN bootstrap file and
 # persists dynamic config/policies plus decoded prefix-cache events in local
-# MongoDB. The GATEWAY owns only the connection registry (SQLite) and sends a
+# MongoDB. The GATEWAY owns only the connection registry (local SQLite here;
+# MySQL in Kubernetes/production) and sends a
 # bearer token to each kvindexer (which requires it).
 #
 # Quick start (from zero):
@@ -26,6 +27,7 @@
 
 SHELL := /bin/bash
 ROOT  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+RUNTIME_ROOT := $(abspath $(ROOT)/../runtime)
 
 # --- toolchain ---
 GO       := go
@@ -39,6 +41,8 @@ PORT_VLLM_KVI   := 8090
 PORT_SGLANG_KVI := 8091
 PORT_GW         := 8095
 PORT_WEB        := 3000
+PORT_MOONCAKE_MASTER := 50051
+PORT_MOONCAKE_CLIENT := 50052
 
 # --- cluster ids (must match deploy/local-*.yaml) ---
 CLUSTER_VLLM   := local-vllm
@@ -66,6 +70,10 @@ MONGO_VOLUME       := ucloud-kv-indexer-mongo
 MONGO_URI          := mongodb://127.0.0.1:27017
 MONGO_DB_VLLM      := kvindexer_local_vllm
 MONGO_DB_SGLANG    := kvindexer_local_sglang
+
+# --- container image ---
+IMAGE              := uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer:latest
+WEB_IMAGE          := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web:latest
 
 # Bearer token for the gateway↔kvindexer hop (crosses the network in prod). For
 # local dev a fixed dev token is fine; override with `make up AUTH_TOKEN=...`.
@@ -103,18 +111,22 @@ define stop-svc
 	rm -f $(RUN)/$(1).pid
 endef
 
-.PHONY: help build build-go build-web test \
+.PHONY: help build build-go build-web image image-web images test \
         up down restart status logs clean clean-mongo smoke \
         backend-vllm backend-sglang gateway frontend \
         mongo stop-mongo mongo-status \
         stop-backend-vllm stop-backend-sglang stop-gateway stop-frontend \
-        inference stop-inference inference-status
+        mooncake-master mooncake-client stop-mooncake-master stop-mooncake-client \
+        serve-vllm serve-sglang inference-vllm inference stop-inference inference-status
 
 help:
 	@echo "ucloud-kv-indexer local stack (2 clusters: $(CLUSTER_VLLM), $(CLUSTER_SGLANG))"
 	@echo ""
-	@echo "  make inference   start vLLM + SGLang engines on the GPU (separate lifecycle)"
+	@echo "  make inference   start Mooncake + vLLM + SGLang engines (separate lifecycle)"
+	@echo "  make inference-vllm start Mooncake + vLLM only"
 	@echo "  make build       compile Go binaries + web production build"
+	@echo "  make image       build Docker image (override with IMAGE=repo/name:tag)"
+	@echo "  make image-web   build frontend Docker image (override with WEB_IMAGE=repo/name:tag)"
 	@echo "  make up          start MongoDB + gateway + both kvindexer backends + frontend"
 	@echo "  make down        stop the control plane (inference untouched)"
 	@echo "  make restart     down then up"
@@ -143,6 +155,16 @@ build-web:
 		echo 'KVI_API_BASE=http://127.0.0.1:$(PORT_GW)'; \
 	} > .env.local.tmp && mv .env.local.tmp .env.local
 	cd $(ROOT)/web && PATH="$(NODE_BIN):$$PATH" $(NPM) run build
+
+image:
+	@echo "==> building Docker image $(IMAGE)"
+	cd $(ROOT) && $(DOCKER) build -t $(IMAGE) .
+
+image-web:
+	@echo "==> building frontend Docker image $(WEB_IMAGE)"
+	cd $(ROOT) && $(DOCKER) build -f web/Dockerfile -t $(WEB_IMAGE) web
+
+images: image image-web
 
 test:
 	cd $(ROOT) && $(GO) test ./...
@@ -244,22 +266,57 @@ stop-frontend:
 # GPU and each reserves a fraction of *currently free* memory: if SGLang grabs its
 # share first, vLLM (the larger model) can be left with too little KV cache and
 # fail to initialize. vLLM-first (measured against an empty GPU) avoids that race.
-inference:
-	@echo "==> starting vLLM (:8000) on the GPU, then SGLang (:30000)"
+
+mooncake-master: | $(RUN)
+	$(call start-svc,mooncake-master,$(PORT_MOONCAKE_MASTER),$(RUN)/mooncake-master.log,bash $(RUNTIME_ROOT)/start-mooncake-master-qwen.sh)
+	@for i in $$(seq 1 20); do \
+		if ss -ltn 2>/dev/null | grep -qP ':$(PORT_MOONCAKE_MASTER)\b'; then echo "  Mooncake master ready"; exit 0; fi; \
+		sleep 1; \
+	done; \
+	echo "  Mooncake master did not become ready"; exit 1
+
+mooncake-client: mooncake-master | $(RUN)
+	$(call start-svc,mooncake-client,$(PORT_MOONCAKE_CLIENT),$(RUN)/mooncake-client.log,bash $(RUNTIME_ROOT)/start-mooncake-client-qwen.sh)
+	@for i in $$(seq 1 20); do \
+		if ss -ltn 2>/dev/null | grep -qP ':$(PORT_MOONCAKE_CLIENT)\b'; then echo "  Mooncake client ready"; exit 0; fi; \
+		sleep 1; \
+	done; \
+	echo "  Mooncake client did not become ready"; exit 1
+
+serve-vllm: mooncake-client | $(RUN)
 	$(call start-svc,serve-vllm,8000,$(RUN)/serve-vllm.log,bash $(ROOT)/deploy/serve-vllm.sh)
-	@echo "  waiting for vLLM to be ready before starting SGLang (avoids GPU-mem race)..."
-	@for i in $$(seq 1 60); do \
-		if curl -s --max-time 2 -o /dev/null http://127.0.0.1:8000/health 2>/dev/null; then echo "  vLLM ready"; break; fi; \
-		sleep 3; \
-	done
+
+serve-sglang: | $(RUN)
 	$(call start-svc,serve-sglang,30000,$(RUN)/serve-sglang.log,bash $(ROOT)/deploy/serve-sglang.sh)
+
+inference-vllm: serve-vllm
+	@echo "  waiting for vLLM to be ready..."
+	@for i in $$(seq 1 60); do \
+		if curl -s --max-time 2 -o /dev/null http://127.0.0.1:8000/health 2>/dev/null; then echo "  vLLM ready"; exit 0; fi; \
+		sleep 3; \
+	done; \
+	echo "  vLLM did not become ready"; exit 1
+
+inference:
+	@echo "==> starting Mooncake + vLLM (:8000), then SGLang (:30000)"
+	@$(MAKE) -s inference-vllm
+	@$(MAKE) -s serve-sglang
 	@echo "  (SGLang loads in ~10-20s; check 'make inference-status')"
 
 stop-inference:
 	$(call stop-svc,serve-vllm,8000)
 	$(call stop-svc,serve-sglang,30000)
+	$(call stop-svc,mooncake-client,$(PORT_MOONCAKE_CLIENT))
+	$(call stop-svc,mooncake-master,$(PORT_MOONCAKE_MASTER))
+
+stop-mooncake-client:
+	$(call stop-svc,mooncake-client,$(PORT_MOONCAKE_CLIENT))
+stop-mooncake-master:
+	$(call stop-svc,mooncake-master,$(PORT_MOONCAKE_MASTER))
 
 inference-status:
+	@if ss -ltn 2>/dev/null | grep -qP ':$(PORT_MOONCAKE_MASTER)\b'; then echo "  Mooncake master :$(PORT_MOONCAKE_MASTER) listening"; else echo "  Mooncake master :$(PORT_MOONCAKE_MASTER) down"; fi
+	@if ss -ltn 2>/dev/null | grep -qP ':$(PORT_MOONCAKE_CLIENT)\b'; then echo "  Mooncake client :$(PORT_MOONCAKE_CLIENT) listening"; else echo "  Mooncake client :$(PORT_MOONCAKE_CLIENT) down"; fi
 	@curl -s --max-time 3 http://127.0.0.1:8000/health  -o /dev/null -w "  vLLM   :8000  HTTP %{http_code}\n" 2>/dev/null || echo "  vLLM   :8000  unreachable"
 	@curl -s --max-time 3 http://127.0.0.1:30000/health -o /dev/null -w "  SGLang :30000 HTTP %{http_code}\n" 2>/dev/null || echo "  SGLang :30000 unreachable"
 

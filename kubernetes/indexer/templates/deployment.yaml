@@ -1,0 +1,89 @@
+{{- $root := . }}
+{{- range .Values.indexers }}
+{{- if .enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+  namespace: {{ include "ucloud-kv-indexer.namespace" $root }}
+  labels:
+{{ include "ucloud-kv-indexer.commonLabels" (dict "root" $root "indexer" .) | indent 4 }}
+spec:
+  replicas: {{ .replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kvindexer
+      app.kubernetes.io/instance: {{ .clusterID | quote }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kvindexer
+        app.kubernetes.io/instance: {{ .clusterID | quote }}
+        app.kubernetes.io/region: {{ .region | quote }}
+        app.kubernetes.io/part-of: ucloud-kv-indexer
+    spec:
+{{- with .nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+      containers:
+        - name: kvindexer
+          image: {{ include "ucloud-kv-indexer.image" $root | quote }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          command: ["/usr/local/bin/kvindexer"]
+          args:
+            - -addr={{ .listenAddress }}
+            - -store={{ .store }}
+            - -bootstrap=/etc/kvindexer/bootstrap/{{ .bootstrapFile }}
+            - -cluster={{ .clusterID }}
+          ports:
+            - name: http
+              containerPort: {{ .port }}
+          env:
+            - name: KVINDEXER_MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ucloud-kv-indexer.secretName" $root }}
+                  key: {{ .name }}-mongo-uri
+            - name: KVINDEXER_MONGO_DB
+              value: {{ .mongo.db | quote }}
+            - name: KVINDEXER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ucloud-kv-indexer.secretName" $root }}
+                  key: backend-token
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+{{- with .resources }}
+          resources:
+{{ toYaml . | indent 12 }}
+{{- end }}
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /etc/kvindexer/bootstrap
+              readOnly: true
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: {{ include "ucloud-kv-indexer.bootstrapName" $root }}
+{{- end }}
+{{- end }}

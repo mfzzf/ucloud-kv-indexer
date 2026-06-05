@@ -1,0 +1,51 @@
+namespace:
+  create: true
+  name: kv-cn-guangzhou
+
+bootstrap:
+  files:
+    cn-guangzhou-sglang.yaml: |
+      clusters:
+        - cluster_id: cn-guangzhou-sglang
+          display_name: cn-guangzhou SGLang Qwen3-0.6B
+          region: cn-guangzhou
+          environment: prod
+          enabled: true
+          framework: sglang
+          backends:
+            - http://kvindexer-sglang-cn-guangzhou.internal.example.com:8090
+          models:
+            - model_id: qwen3-0.6b
+              block_size: 64
+              hash_seed: "0"
+              tokenizer_endpoint: http://sglang.cn-guangzhou.svc.cluster.local:30000
+          engines:
+            - engine_id: sglang-cn-guangzhou-0
+              api_endpoint: http://sglang.cn-guangzhou.svc.cluster.local:30000
+              tokenizer_endpoint: http://sglang.cn-guangzhou.svc.cluster.local:30000
+              kv_event_endpoint: tcp://sglang.cn-guangzhou.svc.cluster.local:5557
+              replay_endpoint: tcp://sglang.cn-guangzhou.svc.cluster.local:5558
+              topic: kv-events
+              served_models: [qwen3-0.6b]
+              dp_ranks: 1
+              max_model_len: 8192
+
+indexers:
+  - name: kvindexer-sglang-cn-guangzhou
+    enabled: true
+    region: cn-guangzhou
+    clusterID: cn-guangzhou-sglang
+    replicas: 1
+    listenAddress: ":8090"
+    port: 8090
+    store: mongo
+    bootstrapFile: cn-guangzhou-sglang.yaml
+    service:
+      type: ClusterIP
+    mongo:
+      uri: mongodb://kvindexer:1f81067287da95635fe20b5336edc4b84ec7d444f9a4092ccee854518401584f@mongodb-cn-guangzhou.example.com:27017/?authSource=admin
+      db: kvindexer_cn_guangzhou_sglang
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}

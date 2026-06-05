@@ -1,0 +1,7 @@
+Gateway chart rendered.
+
+Service:
+  {{ include "ucloud-kv-gateway.name" . }}.{{ include "ucloud-kv-gateway.namespace" . }}.svc.cluster.local:{{ .Values.gateway.port }}
+
+This chart does not deploy MySQL. KVGATEWAY_MYSQL_DSN is read from Secret
+{{ include "ucloud-kv-gateway.secretName" . }}/mysql-dsn.

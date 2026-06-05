@@ -35,6 +35,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { EmptyState, PageHeader, QueryState } from "@/components/page";
 import { StreamStatusBadge, useRelativeTime } from "@/components/stream-status";
 import { useT } from "@/lib/i18n";
@@ -61,6 +62,7 @@ function observedUnix(e: KVEventRecord): number {
 }
 
 const eventsPerPage = 10;
+type IndexedFilter = "yes" | "no" | "all";
 
 export default function StreamsPage() {
   const t = useT();
@@ -80,6 +82,7 @@ export default function StreamsPage() {
   });
   const [liveEvents, setLiveEvents] = React.useState<KVEventRecord[]>([]);
   const [eventPage, setEventPage] = React.useState(1);
+  const [indexedFilter, setIndexedFilter] = React.useState<IndexedFilter>("yes");
   const [selectedEvent, setSelectedEvent] = React.useState<KVEventRecord | null>(
     null,
   );
@@ -94,6 +97,10 @@ export default function StreamsPage() {
     setEventPage(1);
     setSelectedEvent(null);
   }, [cluster]);
+
+  React.useEffect(() => {
+    setEventPage(1);
+  }, [indexedFilter]);
 
   React.useEffect(() => {
     if (!canStream) {
@@ -124,6 +131,14 @@ export default function StreamsPage() {
   const unhealthy = list.filter(
     (s) => streamStatus(s, now, staleAfterMs) !== "healthy",
   ).length;
+  const filteredEvents = React.useMemo(
+    () =>
+      liveEvents.filter((event) => {
+        if (indexedFilter === "all") return true;
+        return indexedFilter === "yes" ? event.indexed : !event.indexed;
+      }),
+    [liveEvents, indexedFilter],
+  );
 
   return (
     <div className="space-y-6">
@@ -288,18 +303,45 @@ export default function StreamsPage() {
               </CardTitle>
               <CardDescription>{t("streams.events.desc")}</CardDescription>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setEventPage(1);
-                kvEvents.refetch();
-              }}
-              disabled={kvEvents.isFetching}
-            >
-              <RefreshCw />
-              {t("streams.events.query")}
-            </Button>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">
+                  {t("streams.events.filter.indexed")}
+                </span>
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  size="sm"
+                  value={indexedFilter}
+                  onValueChange={(value) => {
+                    if (value) setIndexedFilter(value as IndexedFilter);
+                  }}
+                  aria-label={t("streams.events.filter.indexed")}
+                >
+                  <ToggleGroupItem value="yes">
+                    {t("common.yes")}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="no">
+                    {t("common.no")}
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="all">
+                    {t("streams.events.filter.all")}
+                  </ToggleGroupItem>
+                </ToggleGroup>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setEventPage(1);
+                  kvEvents.refetch();
+                }}
+                disabled={kvEvents.isFetching}
+              >
+                <RefreshCw />
+                {t("streams.events.query")}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="px-0">
@@ -340,7 +382,7 @@ export default function StreamsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {pagedEvents(liveEvents, eventPage).map((e) => (
+                {pagedEvents(filteredEvents, eventPage).map((e) => (
                   <TableRow key={eventKey(e)}>
                     <TableCell className="pl-6 font-mono text-xs">
                       {rel(observedUnix(e), now)}
@@ -391,15 +433,19 @@ export default function StreamsPage() {
                 ))}
               </TableBody>
             </Table>
-            {liveEvents.length > 0 && (
+            {filteredEvents.length > 0 && (
               <EventPager
                 page={eventPage}
-                total={liveEvents.length}
+                total={filteredEvents.length}
                 onPage={setEventPage}
               />
             )}
-            {liveEvents.length === 0 && (
-              <EmptyState>{t("streams.events.empty")}</EmptyState>
+            {filteredEvents.length === 0 && (
+              <EmptyState>
+                {liveEvents.length === 0
+                  ? t("streams.events.empty")
+                  : t("streams.events.empty_filtered")}
+              </EmptyState>
             )}
           </QueryState>
         </CardContent>

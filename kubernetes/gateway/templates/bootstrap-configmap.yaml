@@ -1,0 +1,14 @@
+{{- if .Values.bootstrap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ucloud-kv-gateway.bootstrapName" . }}
+  namespace: {{ include "ucloud-kv-gateway.namespace" . }}
+  labels:
+{{ include "ucloud-kv-gateway.labels" . | indent 4 }}
+data:
+{{- range $name, $content := .Values.bootstrap.files }}
+  {{ $name }}: |-
+{{ $content | trim | nindent 4 }}
+{{- end }}
+{{- end }}

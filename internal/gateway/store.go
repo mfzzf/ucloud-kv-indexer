@@ -6,7 +6,8 @@ import (
 	"net/url"
 	"sync"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver (no cgo)
+	_ "github.com/go-sql-driver/mysql" // MySQL driver for production gateway registry
+	_ "modernc.org/sqlite"             // pure-Go SQLite driver (no cgo)
 )
 
 // Connection is one kvindexer the gateway federates: a cluster served by a
@@ -26,11 +27,21 @@ type Connection struct {
 	Enabled bool   `json:"enabled"`
 }
 
-// ConnStore is a SQLite-backed registry of kvindexer connections. It is the
+type connStoreDialect string
+
+const (
+	dialectSQLite connStoreDialect = "sqlite"
+	dialectMySQL  connStoreDialect = "mysql"
+)
+
+// ConnStore is a SQL-backed registry of kvindexer connections. It is the
 // gateway's source of truth after first seed; the admin API mutates it and the
-// gateway reads an in-memory snapshot refreshed on every write.
+// gateway reads an in-memory snapshot refreshed on every write. Local dev uses
+// SQLite; Kubernetes/production should use MySQL.
 type ConnStore struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect connStoreDialect
+	label   string
 
 	mu    sync.RWMutex
 	cache []Connection
@@ -45,17 +56,39 @@ func OpenConnStore(path string) (*ConnStore, error) {
 		return nil, fmt.Errorf("gateway sqlite: open %s: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	s := &ConnStore{db: db}
-	const schema = `CREATE TABLE IF NOT EXISTS connections (
-        id      TEXT PRIMARY KEY,
-        cluster TEXT NOT NULL,
-        url     TEXT NOT NULL,
-        token   TEXT NOT NULL DEFAULT '',
-        enabled INTEGER NOT NULL DEFAULT 1
-    );`
+	return openConnStore(db, dialectSQLite, path)
+}
+
+// OpenMySQLConnStore opens a MySQL-backed connection registry. dsn uses the
+// go-sql-driver/mysql form, for example:
+//
+//	kvgateway:secret@tcp(mysql:3306)/kvgateway?parseTime=true
+func OpenMySQLConnStore(dsn string) (*ConnStore, error) {
+	if dsn == "" {
+		return nil, fmt.Errorf("gateway mysql: dsn required")
+	}
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("gateway mysql: open: %w", err)
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	return openConnStore(db, dialectMySQL, "mysql")
+}
+
+func openConnStore(db *sql.DB, dialect connStoreDialect, label string) (*ConnStore, error) {
+	s := &ConnStore{db: db, dialect: dialect, label: label}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("gateway %s: ping: %w", dialect, err)
+	}
+	schema := sqliteSchema
+	if dialect == dialectMySQL {
+		schema = mysqlSchema
+	}
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("gateway sqlite: init schema: %w", err)
+		return nil, fmt.Errorf("gateway %s: init schema: %w", dialect, err)
 	}
 	if err := s.reload(); err != nil {
 		_ = db.Close()
@@ -64,8 +97,33 @@ func OpenConnStore(path string) (*ConnStore, error) {
 	return s, nil
 }
 
+const sqliteSchema = `CREATE TABLE IF NOT EXISTS connections (
+    id      TEXT PRIMARY KEY,
+    cluster TEXT NOT NULL,
+    url     TEXT NOT NULL,
+    token   TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1
+);`
+
+const mysqlSchema = `CREATE TABLE IF NOT EXISTS connections (
+    id      VARCHAR(191) PRIMARY KEY,
+    cluster VARCHAR(191) NOT NULL,
+    url     TEXT NOT NULL,
+    token   TEXT NOT NULL,
+    enabled TINYINT(1) NOT NULL DEFAULT 1,
+    INDEX idx_connections_cluster (cluster)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`
+
 // Close closes the database.
 func (s *ConnStore) Close() error { return s.db.Close() }
+
+// Description returns a short storage label for logs.
+func (s *ConnStore) Description() string {
+	if s.label == "" {
+		return string(s.dialect)
+	}
+	return fmt.Sprintf("%s:%s", s.dialect, s.label)
+}
 
 // Count returns the number of stored connections (any enabled state).
 func (s *ConnStore) Count() int {
@@ -89,10 +147,7 @@ func (s *ConnStore) SeedIfEmpty(conns []Connection) (bool, error) {
 		return false, err
 	}
 	for _, c := range conns {
-		if _, err := tx.Exec(
-			"INSERT OR REPLACE INTO connections(id,cluster,url,token,enabled) VALUES(?,?,?,?,?)",
-			c.ID, c.Cluster, c.URL, c.Token, b2i(c.Enabled),
-		); err != nil {
+		if err := s.execUpsert(tx, c); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}
@@ -131,13 +186,27 @@ func (s *ConnStore) Upsert(c Connection) error {
 	if err := validateConnection(c); err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(
-		"INSERT OR REPLACE INTO connections(id,cluster,url,token,enabled) VALUES(?,?,?,?,?)",
-		c.ID, c.Cluster, c.URL, c.Token, b2i(c.Enabled),
-	); err != nil {
+	if err := s.execUpsert(s.db, c); err != nil {
 		return err
 	}
 	return s.reload()
+}
+
+type sqlExecutor interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func (s *ConnStore) execUpsert(exec sqlExecutor, c Connection) error {
+	if err := validateConnection(c); err != nil {
+		return err
+	}
+	query := `INSERT OR REPLACE INTO connections(id,cluster,url,token,enabled) VALUES(?,?,?,?,?)`
+	if s.dialect == dialectMySQL {
+		query = `INSERT INTO connections(id,cluster,url,token,enabled) VALUES(?,?,?,?,?)
+ON DUPLICATE KEY UPDATE cluster=VALUES(cluster), url=VALUES(url), token=VALUES(token), enabled=VALUES(enabled)`
+	}
+	_, err := exec.Exec(query, c.ID, c.Cluster, c.URL, c.Token, b2i(c.Enabled))
+	return err
 }
 
 // validateConnection checks required fields and that the URL is a usable
@@ -166,7 +235,7 @@ func (s *ConnStore) Delete(id string) error {
 func (s *ConnStore) reload() error {
 	rows, err := s.db.Query("SELECT id,cluster,url,token,enabled FROM connections ORDER BY cluster,id")
 	if err != nil {
-		return fmt.Errorf("gateway sqlite: list: %w", err)
+		return fmt.Errorf("gateway %s: list: %w", s.dialect, err)
 	}
 	defer rows.Close()
 	var cs []Connection

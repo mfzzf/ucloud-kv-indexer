@@ -1,0 +1,8 @@
+Web chart rendered.
+
+Service:
+  {{ include "ucloud-kv-web.name" . }}.{{ include "ucloud-kv-web.namespace" . }}.svc.cluster.local:{{ .Values.web.port }}
+
+The browser calls same-origin /api/kvi/*.
+The Next.js server proxies that path to:
+  {{ .Values.web.gatewayBaseURL }}

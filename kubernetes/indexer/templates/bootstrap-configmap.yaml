@@ -1,0 +1,16 @@
+{{- if .Values.bootstrap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ucloud-kv-indexer.bootstrapName" . }}
+  namespace: {{ include "ucloud-kv-indexer.namespace" . }}
+  labels:
+    helm.sh/chart: {{ include "ucloud-kv-indexer.chart" . }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/part-of: ucloud-kv-indexer
+data:
+{{- range $name, $content := .Values.bootstrap.files }}
+  {{ $name }}: |-
+{{ $content | trim | nindent 4 }}
+{{- end }}
+{{- end }}

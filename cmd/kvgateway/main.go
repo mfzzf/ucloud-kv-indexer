@@ -3,7 +3,7 @@
 // console talks to this single endpoint and selects a cluster with ?cluster=;
 // the gateway fans out reads and proxies writes/admission to the right backend.
 //
-// The gateway OWNS the connection registry in SQLite (-sqlite-path): the list of
+// The gateway OWNS the connection registry (-store sqlite|mysql): the list of
 // kvindexers it federates ({id, cluster, url, token, enabled}). On first boot an
 // empty registry is SEEDED from -config/-configs topology YAML — one connection
 // per clusters[].backends URL, id
@@ -29,21 +29,29 @@ import (
 func main() {
 	var (
 		addr         = flag.String("addr", ":8095", "HTTP listen address")
+		storeBackend = flag.String("store", "sqlite", "connection registry backend: sqlite | mysql")
 		sqlitePath   = flag.String("sqlite-path", "data/gateway.db", "SQLite connection registry path: the gateway manages kvindexer connections here and serves /admin/connections CRUD")
+		mysqlDSN     = flag.String("mysql-dsn", "", "MySQL DSN for the gateway connection registry (store=mysql; env KVGATEWAY_MYSQL_DSN)")
 		configPath   = flag.String("config", "", "topology YAML; on first boot its clusters[].backends SEED the (empty) connection registry")
 		configPaths  = flag.String("configs", "", "comma-separated topology config YAML files; merged for first-boot connection seeding")
 		backendToken = flag.String("backend-token", "", "bearer token the gateway sends to every kvindexer (env KVGATEWAY_BACKEND_TOKEN); applied to seeded connections")
 	)
 	flag.Parse()
 
+	if v := os.Getenv("KVGATEWAY_STORE"); v != "" {
+		*storeBackend = v
+	}
+	if v := os.Getenv("KVGATEWAY_MYSQL_DSN"); v != "" {
+		*mysqlDSN = v
+	}
 	if *backendToken == "" {
 		*backendToken = os.Getenv("KVGATEWAY_BACKEND_TOKEN")
 	}
 
-	// The gateway OWNS the connection registry in SQLite (inverse topology — the
-	// Seed once from -config/-configs when the DB is empty, then
+	// The gateway OWNS the connection registry (inverse topology). Seed once from
+	// -config/-configs when the DB is empty, then
 	// the DB + /admin/connections are authoritative.
-	store, err := gateway.OpenConnStore(*sqlitePath)
+	store, err := openConnectionStore(*storeBackend, *sqlitePath, *mysqlDSN)
 	if err != nil {
 		log.Fatalf("connection store: %v", err)
 	}
@@ -55,7 +63,7 @@ func main() {
 		if ok, err := store.SeedIfEmpty(seed); err != nil {
 			log.Fatalf("seed connections: %v", err)
 		} else if ok {
-			log.Printf("seeded %d connection(s) from %s into %s", len(seed), strings.Join(paths, ","), *sqlitePath)
+			log.Printf("seeded %d connection(s) from %s into %s", len(seed), strings.Join(paths, ","), store.Description())
 		} else {
 			log.Printf("connection registry already populated (%d rows); not re-seeding", store.Count())
 		}
@@ -69,6 +77,18 @@ func main() {
 		log.Printf("warning: gateway has 0 enabled connections (registry rows=%d); it will federate nothing until you add connections via /admin/connections or seed with -config", store.Count())
 	}
 	runServer(*addr, gateway.NewWithStore(store, time.Now), len(active))
+}
+
+func openConnectionStore(storeBackend, sqlitePath, mysqlDSN string) (*gateway.ConnStore, error) {
+	switch storeBackend {
+	case "sqlite":
+		return gateway.OpenConnStore(sqlitePath)
+	case "mysql":
+		return gateway.OpenMySQLConnStore(mysqlDSN)
+	default:
+		log.Fatalf("unknown -store %q (want sqlite|mysql)", storeBackend)
+		return nil, nil
+	}
 }
 
 // runServer starts the HTTP server and blocks until SIGINT/SIGTERM.

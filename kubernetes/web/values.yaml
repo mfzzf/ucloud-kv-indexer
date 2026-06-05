@@ -1,0 +1,29 @@
+namespace:
+  create: true
+  name: ucloud-kv-web
+
+image:
+  repository: uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web
+  tag: latest
+  pullPolicy: IfNotPresent
+
+web:
+  name: ucloud-kv-web
+  replicas: 1
+  port: 3000
+  gatewayBaseURL: http://kvgateway.ucloud-kv-gateway.svc.cluster.local:8095
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+    className: ""
+    hosts:
+      - host: kv-indexer.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

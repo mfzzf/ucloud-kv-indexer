@@ -1,0 +1,8 @@
+Indexer chart rendered.
+
+Rendered indexers:
+{{- range .Values.indexers }}
+{{- if .enabled }}
+  - {{ .name }} (cluster={{ .clusterID }}, region={{ .region }})
+{{- end }}
+{{- end }}

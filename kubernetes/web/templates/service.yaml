@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ucloud-kv-web.name" . }}
+  namespace: {{ include "ucloud-kv-web.namespace" . }}
+  labels:
+{{ include "ucloud-kv-web.labels" . | indent 4 }}
+spec:
+  type: {{ .Values.web.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.web.port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: ucloud-kv-web

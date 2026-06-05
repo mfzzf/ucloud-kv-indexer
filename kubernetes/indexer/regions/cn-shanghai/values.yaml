@@ -1,0 +1,51 @@
+namespace:
+  create: true
+  name: kv-cn-shanghai
+
+bootstrap:
+  files:
+    cn-shanghai-vllm.yaml: |
+      clusters:
+        - cluster_id: cn-shanghai-vllm
+          display_name: cn-shanghai vLLM Qwen3.5-4B
+          region: cn-shanghai
+          environment: prod
+          enabled: true
+          framework: vllm
+          backends:
+            - http://kvindexer-vllm-cn-shanghai.internal.example.com:8090
+          models:
+            - model_id: qwen3.5-4b
+              block_size: 528
+              hash_seed: "0"
+              tokenizer_endpoint: http://vllm.cn-shanghai.svc.cluster.local:8000
+          engines:
+            - engine_id: vllm-cn-shanghai-0
+              api_endpoint: http://vllm.cn-shanghai.svc.cluster.local:8000
+              tokenizer_endpoint: http://vllm.cn-shanghai.svc.cluster.local:8000
+              kv_event_endpoint: tcp://vllm.cn-shanghai.svc.cluster.local:5559
+              replay_endpoint: tcp://vllm.cn-shanghai.svc.cluster.local:5560
+              topic: kv-events
+              served_models: [qwen3.5-4b]
+              dp_ranks: 1
+              max_model_len: 65536
+
+indexers:
+  - name: kvindexer-vllm-cn-shanghai
+    enabled: true
+    region: cn-shanghai
+    clusterID: cn-shanghai-vllm
+    replicas: 1
+    listenAddress: ":8090"
+    port: 8090
+    store: mongo
+    bootstrapFile: cn-shanghai-vllm.yaml
+    service:
+      type: ClusterIP
+    mongo:
+      uri: mongodb://kvindexer:084cd20669f55b340cddd0357d80c42fec78673db51cf622bf8c6b531d95c126@mongodb-cn-shanghai.example.com:27017/?authSource=admin
+      db: kvindexer_cn_shanghai_vllm
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}

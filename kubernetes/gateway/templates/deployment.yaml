@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ucloud-kv-gateway.name" . }}
+  namespace: {{ include "ucloud-kv-gateway.namespace" . }}
+  labels:
+{{ include "ucloud-kv-gateway.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kvgateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kvgateway
+        app.kubernetes.io/part-of: ucloud-kv-indexer
+    spec:
+{{- with .Values.gateway.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.gateway.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.gateway.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+      containers:
+        - name: kvgateway
+          image: {{ include "ucloud-kv-gateway.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/kvgateway"]
+          args:
+            - -addr={{ .Values.gateway.listenAddress }}
+            - -store={{ .Values.gateway.store }}
+{{- if .Values.gateway.configFiles }}
+{{- $paths := list }}
+{{- range .Values.gateway.configFiles }}
+{{- $paths = append $paths (printf "/etc/kvindexer/bootstrap/%s" .) }}
+{{- end }}
+            - -configs={{ join "," $paths }}
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.port }}
+          env:
+            - name: KVGATEWAY_BACKEND_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ucloud-kv-gateway.secretName" . }}
+                  key: backend-token
+            - name: KVGATEWAY_MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ucloud-kv-gateway.secretName" . }}
+                  key: mysql-dsn
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+{{- with .Values.gateway.resources }}
+          resources:
+{{ toYaml . | indent 12 }}
+{{- end }}
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /etc/kvindexer/bootstrap
+              readOnly: true
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: {{ include "ucloud-kv-gateway.bootstrapName" . }}

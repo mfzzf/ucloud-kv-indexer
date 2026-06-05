@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ucloud-kv-web
+description: Helm chart for the ucloud-kv-indexer Next.js console.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

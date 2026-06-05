@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleHelp, Pencil, PlayCircle, Plus, Trash2 } from "lucide-react";
 import {
   api,
+  Cluster as ConfigCluster,
   ModelProfile,
   Policy,
   PolicyPreview,
@@ -82,6 +83,7 @@ const conditionFields = [
 const conditionOps = ["eq", "neq", "in", "not_in", "gt", "gte", "lt", "lte", "contains"];
 const actionTypes = ["accept", "reject", "require_cache_hit"];
 const outcomes = ["reject", "fallback_accept", "accept"];
+const anyClusterValue = "__any_cluster__";
 
 type ConditionDraft = {
   field: string;
@@ -93,6 +95,7 @@ type PolicyFormState = {
   rule_id: string;
   name: string;
   priority: number;
+  scope_cluster: string;
   conditions: ConditionDraft[];
   action_type: string;
   min_hit_ratio: number;
@@ -105,7 +108,25 @@ type PolicyFormState = {
 export default function PoliciesPage() {
   const t = useT();
   const qc = useQueryClient();
-  const { cluster, multiCluster } = useCluster();
+  const { cluster, clusters, multiCluster } = useCluster();
+  const clusterCatalog = useQuery({
+    queryKey: ["policy-cluster-options"],
+    queryFn: () => api.get<ConfigCluster[]>("/clusters"),
+    retry: false,
+    staleTime: 10_000,
+  });
+  const clusterOptions = React.useMemo(
+    () =>
+      [
+        ...new Set([
+          ...clusters.map((c) => c.cluster),
+          ...(clusterCatalog.data ?? []).map((c) => c.cluster_id),
+        ]),
+      ]
+        .filter(Boolean)
+        .sort(),
+    [clusters, clusterCatalog.data],
+  );
   const policies = useQuery({
     queryKey: ["policies", cluster],
     queryFn: () => api.get<Policy[]>(clusterQ("/policies", cluster)),
@@ -172,7 +193,7 @@ export default function PoliciesPage() {
                   <SheetTitle>{t("policies.test.title")}</SheetTitle>
                   <SheetDescription>{t("policies.test.desc")}</SheetDescription>
                 </SheetHeader>
-                <RulePreview cluster={cluster} />
+                <RulePreview cluster={cluster} clusterOptions={clusterOptions} />
               </SheetContent>
             </Sheet>
             <Sheet open={open} onOpenChange={setOpen}>
@@ -189,6 +210,8 @@ export default function PoliciesPage() {
                 </SheetHeader>
                 <PolicyForm
                   cluster={cluster}
+                  multiCluster={multiCluster}
+                  clusterOptions={clusterOptions}
                   onDone={() => {
                     setOpen(false);
                     qc.invalidateQueries({ queryKey: ["policies"] });
@@ -236,7 +259,7 @@ export default function PoliciesPage() {
                   {multiCluster && (
                     <TableHead>
                       <HeadWithHelp
-                        label={t("cluster.col")}
+                        label={t("policies.col.scope_cluster")}
                         help={t("policies.help.cluster")}
                       />
                     </TableHead>
@@ -295,11 +318,15 @@ export default function PoliciesPage() {
                     </TableCell>
                     {multiCluster && (
                       <TableCell className="text-xs">
-                        <Badge variant="outline">{p._cluster ?? "—"}</Badge>
+                        <PolicyClusterScope policy={p} />
                       </TableCell>
                     )}
                     <TableCell>
-                      <ConditionChips conditions={p.conditions ?? []} />
+                      <ConditionChips
+                        conditions={(p.conditions ?? []).filter(
+                          (condition) => condition.field !== "cluster_id",
+                        )}
+                      />
                     </TableCell>
                     <TableCell>
                       <ActionBadge action={p.action?.type} />
@@ -374,6 +401,8 @@ export default function PoliciesPage() {
           {editing && (
             <PolicyForm
               cluster={cluster}
+              multiCluster={multiCluster}
+              clusterOptions={clusterOptions}
               initial={editing}
               onDone={() => {
                 setEditing(null);
@@ -468,6 +497,22 @@ function ConditionChips({ conditions }: { conditions: RuleCondition[] }) {
   );
 }
 
+function PolicyClusterScope({ policy }: { policy: Policy }) {
+  const t = useT();
+  return (
+    <div className="flex min-w-28 flex-col gap-1">
+      <Badge variant="outline">
+        {policyClusterScope(policy.conditions ?? [], t)}
+      </Badge>
+      {policy._cluster && (
+        <span className="text-xs text-muted-foreground">
+          {t("policies.storage_cluster").replace("{cluster}", policy._cluster)}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function ActionBadge({ action }: { action?: string }) {
   const t = useT();
   if (action === "reject") {
@@ -490,7 +535,13 @@ function OutcomeBadge({ outcome }: { outcome?: string }) {
   return <Badge variant="warning">{t("policies.outcome.fallback_accept")}</Badge>;
 }
 
-function RulePreview({ cluster }: { cluster: string }) {
+function RulePreview({
+  cluster,
+  clusterOptions,
+}: {
+  cluster: string;
+  clusterOptions: string[];
+}) {
   const t = useT();
   const profiles = useQuery({
     queryKey: ["profiles", cluster],
@@ -526,7 +577,7 @@ function RulePreview({ cluster }: { cluster: string }) {
   const run = useMutation({
     mutationFn: () =>
       api.post<PolicyPreview>(
-        clusterQ("/config/effective-policy/preview", cluster),
+        clusterQ("/config/effective-policy/preview", scope.cluster_id || cluster),
         scope,
       ),
     onSuccess: (d) => {
@@ -583,11 +634,37 @@ function RulePreview({ cluster }: { cluster: string }) {
         <FieldLabelWithHelp help={t("policies.help.cluster")}>
           {t("policies.field.cluster")}
         </FieldLabelWithHelp>
-        <Input
-          value={scope.cluster_id}
-          placeholder={t("common.any")}
-          onChange={(e) => setScope({ ...scope, cluster_id: e.target.value })}
-        />
+        {clusterOptions.length > 0 ? (
+          <Select
+            value={scope.cluster_id || anyClusterValue}
+            onValueChange={(value) =>
+              setScope({
+                ...scope,
+                cluster_id: value === anyClusterValue ? "" : value,
+              })
+            }
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value={anyClusterValue}>{t("common.any")}</SelectItem>
+                {clusterOptions.map((id) => (
+                  <SelectItem key={id} value={id}>
+                    {id}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        ) : (
+          <Input
+            value={scope.cluster_id}
+            placeholder={t("common.any")}
+            onChange={(e) => setScope({ ...scope, cluster_id: e.target.value })}
+          />
+        )}
       </Field>
       <Field>
         <FieldLabelWithHelp help={t("policies.help.input_tokens")}>
@@ -677,11 +754,15 @@ function Row({
 
 function PolicyForm({
   cluster,
+  multiCluster,
+  clusterOptions,
   initial,
   onDone,
   onCancel,
 }: {
   cluster: string;
+  multiCluster: boolean;
+  clusterOptions: string[];
   initial?: Policy;
   onDone: () => void;
   onCancel: () => void;
@@ -699,7 +780,11 @@ function PolicyForm({
     mutationFn: () => {
       const body = payloadFromForm(f);
       if (!initial) {
-        return api.post(clusterQ("/policies", cluster), body);
+        const targetCluster = createTargetCluster(f, cluster, multiCluster);
+        if (!targetCluster && multiCluster) {
+          throw new Error(t("policies.error.target_cluster_required"));
+        }
+        return api.post(clusterQ("/policies", targetCluster || cluster), body);
       }
       const path = `/policies/${encodeURIComponent(initial.rule_id)}`;
       const target = initial._backend
@@ -757,6 +842,19 @@ function PolicyForm({
               placeholder={t("policies.field.name_ph")}
               onChange={(e) => set("name", e.target.value)}
             />
+          </Field>
+          <Field className="sm:col-span-2">
+            <FieldLabelWithHelp help={t("policies.help.cluster")}>
+              {t("policies.field.scope_cluster")}
+            </FieldLabelWithHelp>
+            <ClusterScopeControl
+              value={f.scope_cluster}
+              clusterOptions={clusterOptions}
+              onChange={(value) => set("scope_cluster", value)}
+            />
+            <FieldDescription>
+              {t("policies.scope_cluster.desc")}
+            </FieldDescription>
           </Field>
         </div>
 
@@ -840,12 +938,10 @@ function PolicyForm({
                 </Field>
                 <Field>
                   <FieldLabel>{t("policies.condition.value")}</FieldLabel>
-                  <Input
-                    value={condition.value}
-                    placeholder={valuePlaceholder(condition.field, condition.op, t)}
-                    onChange={(e) =>
-                      setCondition(index, { value: e.target.value })
-                    }
+                  <ConditionValueControl
+                    condition={condition}
+                    clusterOptions={clusterOptions}
+                    onChange={(value) => setCondition(index, { value })}
                   />
                 </Field>
                 <div className="flex items-end justify-end">
@@ -1005,17 +1101,108 @@ function OutcomeSelect({
   );
 }
 
+function ClusterScopeControl({
+  value,
+  clusterOptions,
+  onChange,
+}: {
+  value: string;
+  clusterOptions: string[];
+  onChange: (value: string) => void;
+}) {
+  const t = useT();
+  if (clusterOptions.length === 0) {
+    return (
+      <Input
+        value={value}
+        placeholder={t("common.any")}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    );
+  }
+
+  return (
+    <Select
+      value={value || anyClusterValue}
+      onValueChange={(next) =>
+        onChange(next === anyClusterValue ? "" : next)
+      }
+    >
+      <SelectTrigger className="w-full">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectGroup>
+          <SelectItem value={anyClusterValue}>{t("common.any")}</SelectItem>
+          {clusterOptions.map((id) => (
+            <SelectItem key={id} value={id}>
+              {id}
+            </SelectItem>
+          ))}
+        </SelectGroup>
+      </SelectContent>
+    </Select>
+  );
+}
+
+function ConditionValueControl({
+  condition,
+  clusterOptions,
+  onChange,
+}: {
+  condition: ConditionDraft;
+  clusterOptions: string[];
+  onChange: (value: string) => void;
+}) {
+  const t = useT();
+  const singleClusterEq =
+    condition.field === "cluster_id" &&
+    condition.op !== "in" &&
+    condition.op !== "not_in";
+
+  if (singleClusterEq && clusterOptions.length > 0) {
+    return (
+      <Select value={condition.value} onValueChange={onChange}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder={t("policies.field.cluster")} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            {clusterOptions.map((id) => (
+              <SelectItem key={id} value={id}>
+                {id}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    );
+  }
+
+  return (
+    <Input
+      value={condition.value}
+      placeholder={valuePlaceholder(condition.field, condition.op, t)}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  );
+}
+
 function formStateFromPolicy(initial: Policy | undefined, cluster: string): PolicyFormState {
+  const sourceConditions =
+    initial?.conditions?.map((condition) => ({
+      field: condition.field,
+      op: condition.op || "eq",
+      value: valueToInput(condition.value),
+    })) ?? defaultConditions(cluster);
+  const { scopeCluster, conditions } = extractScopeCluster(sourceConditions);
+
   return {
     rule_id: initial?.rule_id ?? "",
     name: initial?.name ?? "",
     priority: initial?.priority ?? 100,
-    conditions:
-      initial?.conditions?.map((condition) => ({
-        field: condition.field,
-        op: condition.op || "eq",
-        value: valueToInput(condition.value),
-      })) ?? defaultConditions(cluster),
+    scope_cluster: scopeCluster,
+    conditions,
     action_type: initial?.action?.type ?? "require_cache_hit",
     min_hit_ratio: initial?.action?.min_hit_ratio ?? 0.5,
     on_low_hit: initial?.action?.on_low_hit ?? "reject",
@@ -1051,20 +1238,54 @@ function payloadFromForm(f: PolicyFormState): Policy {
   if (f.action_type === "reject") {
     action.reject_status = f.reject_status;
   }
+  const conditions = f.conditions
+    .filter((condition) => condition.field && condition.op)
+    .map((condition) => ({
+      field: condition.field,
+      op: condition.op,
+      value: parseConditionValue(condition.field, condition.op, condition.value),
+    }));
+  if (f.scope_cluster.trim()) {
+    conditions.unshift({
+      field: "cluster_id",
+      op: "eq",
+      value: f.scope_cluster.trim(),
+    });
+  }
   return {
     rule_id: f.rule_id,
     name: f.name || undefined,
     priority: f.priority,
-    conditions: f.conditions
-      .filter((condition) => condition.field && condition.op)
-      .map((condition) => ({
-        field: condition.field,
-        op: condition.op,
-        value: parseConditionValue(condition.field, condition.op, condition.value),
-      })),
+    conditions,
     action,
     enabled: f.enabled,
   };
+}
+
+function extractScopeCluster(conditions: ConditionDraft[]) {
+  const index = conditions.findIndex(
+    (condition) =>
+      condition.field === "cluster_id" &&
+      (condition.op === "" || condition.op === "eq") &&
+      condition.value.trim() !== "",
+  );
+  if (index < 0) {
+    return { scopeCluster: "", conditions };
+  }
+  return {
+    scopeCluster: conditions[index].value.trim(),
+    conditions: conditions.filter((_, i) => i !== index),
+  };
+}
+
+function createTargetCluster(
+  f: PolicyFormState,
+  selectedCluster: string,
+  multiCluster: boolean,
+) {
+  if (f.scope_cluster.trim()) return f.scope_cluster.trim();
+  if (selectedCluster && selectedCluster !== "all") return selectedCluster;
+  return multiCluster ? "" : selectedCluster;
 }
 
 function policyPayload(p: Policy): Policy {
@@ -1140,6 +1361,29 @@ function valuePlaceholder(field: string, op: string, t: (key: string) => string)
   if (field === "kv_event_state") return "available";
   if (booleanField(field)) return "true";
   return "";
+}
+
+function policyClusterScope(
+  conditions: RuleCondition[],
+  t: (key: string) => string,
+) {
+  const clusterConditions = conditions.filter(
+    (condition) => condition.field === "cluster_id",
+  );
+  if (clusterConditions.length === 0) return t("common.any");
+  if (clusterConditions.length === 1) {
+    const condition = clusterConditions[0];
+    if (!condition.op || condition.op === "eq") {
+      return formatConditionValue(condition.value);
+    }
+    if (condition.op === "in") {
+      return formatConditionValue(condition.value);
+    }
+    return conditionText(condition, t);
+  }
+  return clusterConditions
+    .map((condition) => conditionText(condition, t))
+    .join(" AND ");
 }
 
 function conditionText(condition: RuleCondition, t: (key: string) => string) {

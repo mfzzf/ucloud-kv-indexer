@@ -1,0 +1,22 @@
+{{- $root := . }}
+{{- range .Values.indexers }}
+{{- if .enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  namespace: {{ include "ucloud-kv-indexer.namespace" $root }}
+  labels:
+{{ include "ucloud-kv-indexer.commonLabels" (dict "root" $root "indexer" .) | indent 4 }}
+spec:
+  type: {{ .service.type }}
+  ports:
+    - name: http
+      port: {{ .port }}
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: kvindexer
+    app.kubernetes.io/instance: {{ .clusterID | quote }}
+{{- end }}
+{{- end }}

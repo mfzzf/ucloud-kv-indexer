@@ -21,24 +21,5 @@ clusters:
         replay_endpoint: tcp://127.0.0.1:5558
         topic: kv-events
         served_models: [qwen3-0.6b]
-        dp_ranks: 1
+        # dp_ranks: 1
         max_model_len: 8192
-
-policies:
-  - rule_id: local-sglang-cache-gate
-    name: 256 Token 以上要求 KV 命中
-    priority: 100
-    conditions:
-      - field: cluster_id
-        op: eq
-        value: local-sglang
-      - field: input_tokens
-        op: gte
-        value: 256
-    action:
-      type: require_cache_hit
-      min_hit_ratio: 0.5
-      on_low_hit: reject
-      on_uncertain: fallback_accept
-      reject_status: 429
-    enabled: true

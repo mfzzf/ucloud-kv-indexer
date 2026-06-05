@@ -43,7 +43,7 @@ type Backend struct {
 }
 
 // Gateway federates a dynamic set of backends. The backend set is supplied by a
-// provider func (backed by the SQLite connection store) so admin CRUD edits take
+// provider func (backed by the SQL connection store) so admin CRUD edits take
 // effect immediately without a restart.
 type Gateway struct {
 	provider func() []Backend
@@ -69,7 +69,7 @@ func NewWithProvider(provider func() []Backend, now func() time.Time) *Gateway {
 	}
 }
 
-// NewWithStore builds a gateway backed by a SQLite connection store: the active
+// NewWithStore builds a gateway backed by a SQL connection store: the active
 // backend set is the store's enabled connections, and the /admin/connections
 // CRUD endpoints manage them live.
 func NewWithStore(store *ConnStore, now func() time.Time) *Gateway {
@@ -443,7 +443,7 @@ func (g *Gateway) Router() http.Handler {
 		c.JSON(http.StatusOK, openapi.GatewaySpec())
 	})
 
-	// Connection registry admin (only when SQLite-backed). These manage which
+	// Connection registry admin (only when a ConnStore is attached). These manage which
 	// kvindexers the gateway federates — the inverse-topology control surface.
 	if g.store != nil {
 		r.GET("/admin/connections", httpHandler(g.handleListConnections))
