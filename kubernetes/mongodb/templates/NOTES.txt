@@ -1,0 +1,8 @@
+MongoDB chart rendered.
+
+Service:
+  {{ .Values.service.name }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Prepare the target node first:
+  mkdir -p {{ .Values.persistentVolume.localPath }}
+  chown -R 999:999 {{ .Values.persistentVolume.localPath }}

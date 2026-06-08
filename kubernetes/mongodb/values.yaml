@@ -1,0 +1,52 @@
+region: th-gb200
+
+image:
+  repository: mongo
+  tag: "8.0"
+  pullPolicy: IfNotPresent
+
+auth:
+  secretName: mongo-root
+  createSecret: false
+  username: admin
+  password: ""
+
+storageClass:
+  create: true
+  name: local-nvme-manual
+  reclaimPolicy: Retain
+  volumeBindingMode: WaitForFirstConsumer
+
+persistentVolume:
+  create: true
+  name: pv-mongodb-th-gb200-nvme1n1
+  storage: 3Ti
+  localPath: /mnt/nvme1n1/mongodb
+  nodeName: gpusvr001c10
+
+service:
+  name: mongodb
+  headlessName: mongodb-headless
+  port: 27017
+
+statefulset:
+  name: mongodb
+  replicas: 1
+  terminationGracePeriodSeconds: 30
+
+persistence:
+  claimName: mongo-data
+  mountPath: /data/db
+  storage: 3Ti
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: 1Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

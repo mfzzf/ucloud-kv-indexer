@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ucloud-kv-mongodb
+description: Helm chart for a regional MongoDB StatefulSet backed by local NVMe.
+type: application
+version: 0.1.0
+appVersion: "8.0"

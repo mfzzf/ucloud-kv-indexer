@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "ucloud-kv-mongodb.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "ucloud-kv-mongodb.labels" . | indent 4 }}
+spec:
+  serviceName: {{ .Values.service.headlessName }}
+  replicas: {{ .Values.statefulset.replicas }}
+  selector:
+    matchLabels:
+{{ include "ucloud-kv-mongodb.selectorLabels" . | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "ucloud-kv-mongodb.selectorLabels" . | indent 8 }}
+        app.kubernetes.io/part-of: ucloud-kv-indexer
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.statefulset.terminationGracePeriodSeconds }}
+{{- with .Values.nodeSelector }}
+      nodeSelector:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.affinity }}
+      affinity:
+{{ toYaml . | indent 8 }}
+{{- end }}
+{{- with .Values.tolerations }}
+      tolerations:
+{{ toYaml . | indent 8 }}
+{{- end }}
+      initContainers:
+        - name: init-permission
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - chown -R 999:999 {{ .Values.persistence.mountPath }}
+          volumeMounts:
+            - name: {{ .Values.persistence.claimName }}
+              mountPath: {{ .Values.persistence.mountPath }}
+      containers:
+        - name: mongodb
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - mongod
+            - --bind_ip_all
+            - --auth
+          ports:
+            - name: mongo
+              containerPort: {{ .Values.service.port }}
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.secretName }}
+                  key: username
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.secretName }}
+                  key: password
+          volumeMounts:
+            - name: {{ .Values.persistence.claimName }}
+              mountPath: {{ .Values.persistence.mountPath }}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+{{- with .Values.resources }}
+          resources:
+{{ toYaml . | indent 12 }}
+{{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ .Values.persistence.claimName }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: {{ .Values.storageClass.name }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.storage }}

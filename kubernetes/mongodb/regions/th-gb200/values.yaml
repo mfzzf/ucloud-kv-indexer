@@ -1,0 +1,16 @@
+region: th-gb200
+
+auth:
+  secretName: mongo-root
+  createSecret: true
+  username: admin
+  password: rBiuxsNI9pcdsEa6GN9t5XG0vWdi7SPxwA1XcrPo
+
+persistentVolume:
+  name: pv-mongodb-th-gb200-nvme1n1
+  storage: 3Ti
+  localPath: /mnt/nvme1n1/mongodb
+  nodeName: gpusvr001c10
+
+persistence:
+  storage: 3Ti

@@ -49,6 +49,7 @@ spec:
             - name: http
               containerPort: {{ .port }}
           env:
+{{- if eq .store "mongo" }}
             - name: KVINDEXER_MONGO_URI
               valueFrom:
                 secretKeyRef:
@@ -56,6 +57,7 @@ spec:
                   key: {{ .name }}-mongo-uri
             - name: KVINDEXER_MONGO_DB
               value: {{ .mongo.db | quote }}
+{{- end }}
             - name: KVINDEXER_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:

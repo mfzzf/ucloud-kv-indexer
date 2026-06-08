@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.service.headlessName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "ucloud-kv-mongodb.labels" . | indent 4 }}
+spec:
+  clusterIP: None
+  selector:
+{{ include "ucloud-kv-mongodb.selectorLabels" . | indent 4 }}
+  ports:
+    - name: mongo
+      port: {{ .Values.service.port }}
+      targetPort: mongo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.service.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "ucloud-kv-mongodb.labels" . | indent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+{{ include "ucloud-kv-mongodb.selectorLabels" . | indent 4 }}
+  ports:
+    - name: mongo
+      port: {{ .Values.service.port }}
+      targetPort: mongo
