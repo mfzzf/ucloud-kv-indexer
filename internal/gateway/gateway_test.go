@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +178,66 @@ func TestClustersHealth(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestAdminConnectionsCRUDPreservesOmittedFields(t *testing.T) {
+	store, err := OpenConnStore(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	h := NewWithStore(store, time.Now).Router()
+
+	code, body := doJSON(t, h, "POST", "/admin/connections", `{
+		"id":"idx-0",
+		"cluster":"hkg-vllm",
+		"url":"http://127.0.0.1:8090",
+		"token":"secret-token",
+		"enabled":true
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("create status %d body %s", code, body)
+	}
+
+	code, body = doJSON(t, h, "POST", "/admin/connections", `{"id":"idx-0","enabled":false}`)
+	if code != http.StatusOK {
+		t.Fatalf("partial update status %d body %s", code, body)
+	}
+
+	conns := store.List()
+	if len(conns) != 1 {
+		t.Fatalf("connections=%d want 1", len(conns))
+	}
+	if conns[0].Cluster != "hkg-vllm" || conns[0].URL != "http://127.0.0.1:8090" || conns[0].Token != "secret-token" {
+		t.Fatalf("partial update did not preserve existing fields: %+v", conns[0])
+	}
+	if conns[0].Enabled {
+		t.Fatalf("enabled should be false after partial update: %+v", conns[0])
+	}
+
+	code, body = doJSON(t, h, "GET", "/admin/connections", "")
+	if code != http.StatusOK {
+		t.Fatalf("list status %d body %s", code, body)
+	}
+	var listed []map[string]any
+	if err := json.Unmarshal([]byte(body), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0]["has_token"] != true {
+		t.Fatalf("list should redact token and expose has_token: %s", body)
+	}
+	if _, leaked := listed[0]["token"]; leaked {
+		t.Fatalf("list leaked token: %s", body)
+	}
+
+	code, body = doJSON(t, h, "DELETE", "/admin/connections/idx-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("delete status %d body %s", code, body)
+	}
+	if store.Count() != 0 {
+		t.Fatalf("delete left %d rows", store.Count())
 	}
 }
 

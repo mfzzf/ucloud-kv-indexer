@@ -549,6 +549,14 @@ func (g *Gateway) handleUpsertConnection(w http.ResponseWriter, r *http.Request)
 	}
 
 	c := Connection{ID: in.ID, Cluster: in.Cluster, URL: in.URL}
+	if existing != nil {
+		if c.Cluster == "" {
+			c.Cluster = existing.Cluster
+		}
+		if c.URL == "" {
+			c.URL = existing.URL
+		}
+	}
 	switch {
 	case in.Token != nil:
 		c.Token = *in.Token

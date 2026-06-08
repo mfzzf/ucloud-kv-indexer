@@ -52,6 +52,14 @@ export interface ClusterInfo {
   backends: BackendHealth[];
 }
 
+export interface IndexerConnection {
+  id: string;
+  cluster: string;
+  url: string;
+  has_token: boolean;
+  enabled: boolean;
+}
+
 // ---- Types mirroring the Go API ----
 
 export interface Cluster {
