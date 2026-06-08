@@ -31,6 +31,8 @@ RUNTIME_ROOT := $(abspath $(ROOT)/../runtime)
 
 # --- toolchain ---
 GO       := go
+OAPI_CODEGEN_VERSION := v2.7.1
+OAPI_CODEGEN := $(GO) run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION)
 # Next 16 needs Node 20 (system node is 18). Keep this assignment comment-free:
 NODE_BIN := /home/ubuntu/.local/node20/bin
 NPM      := $(NODE_BIN)/npm
@@ -53,6 +55,12 @@ RUN      := $(ROOT)/run
 BIN      := $(RUN)/bin
 KVINDEXER:= $(BIN)/kvindexer
 KVGATEWAY:= $(BIN)/kvgateway
+
+# --- OpenAPI artifacts ---
+OPENAPI_DIR := $(ROOT)/api
+OPENAPI_CHECK_DIR := /tmp/ucloud-kv-indexer-openapi-check
+KVINDEXER_OPENAPI := $(OPENAPI_DIR)/kvindexer.openapi.json
+GATEWAY_OPENAPI := $(OPENAPI_DIR)/gateway.openapi.json
 
 # --- config ---
 # Each kvindexer gets its own cluster-local bootstrap file. The gateway reads
@@ -113,6 +121,7 @@ define stop-svc
 endef
 
 .PHONY: help build build-go build-web image image-local image-web images test \
+        openapi openapi-check \
         up down restart status logs clean clean-mongo smoke \
         backend-vllm backend-sglang gateway frontend \
         mongo stop-mongo mongo-status \
@@ -136,6 +145,8 @@ help:
 	@echo "  make smoke       tokenize + query-prefix both clusters end-to-end"
 	@echo "  make logs        tail -f all control-plane logs"
 	@echo "  make test        go test ./..."
+	@echo "  make openapi     regenerate api/*.openapi.json and validate with oapi-codegen"
+	@echo "  make openapi-check verify checked-in OpenAPI JSON is current"
 	@echo "  make clean       down + remove run/ (keeps MongoDB data)"
 	@echo "  make clean-mongo stop MongoDB and delete its Docker volume"
 
@@ -177,6 +188,22 @@ test:
 
 $(RUN):
 	@mkdir -p $(RUN)
+
+openapi:
+	@mkdir -p $(OPENAPI_DIR) $(OPENAPI_CHECK_DIR)
+	cd $(ROOT) && $(GO) run ./cmd/openapi -kind kvindexer -out $(KVINDEXER_OPENAPI)
+	cd $(ROOT) && $(GO) run ./cmd/openapi -kind gateway -out $(GATEWAY_OPENAPI)
+	cd $(ROOT) && $(OAPI_CODEGEN) -generate types,spec -package kvindexeropenapi -o $(OPENAPI_CHECK_DIR)/kvindexer.gen.go $(KVINDEXER_OPENAPI)
+	cd $(ROOT) && $(OAPI_CODEGEN) -generate types,spec -package gatewayopenapi -o $(OPENAPI_CHECK_DIR)/gateway.gen.go $(GATEWAY_OPENAPI)
+
+openapi-check: | $(RUN)
+	@mkdir -p $(OPENAPI_CHECK_DIR)
+	cd $(ROOT) && $(GO) run ./cmd/openapi -kind kvindexer -out $(OPENAPI_CHECK_DIR)/kvindexer.openapi.json
+	cd $(ROOT) && $(GO) run ./cmd/openapi -kind gateway -out $(OPENAPI_CHECK_DIR)/gateway.openapi.json
+	diff -u $(KVINDEXER_OPENAPI) $(OPENAPI_CHECK_DIR)/kvindexer.openapi.json
+	diff -u $(GATEWAY_OPENAPI) $(OPENAPI_CHECK_DIR)/gateway.openapi.json
+	cd $(ROOT) && $(OAPI_CODEGEN) -generate types,spec -package kvindexeropenapi -o $(OPENAPI_CHECK_DIR)/kvindexer.gen.go $(OPENAPI_CHECK_DIR)/kvindexer.openapi.json
+	cd $(ROOT) && $(OAPI_CODEGEN) -generate types,spec -package gatewayopenapi -o $(OPENAPI_CHECK_DIR)/gateway.gen.go $(OPENAPI_CHECK_DIR)/gateway.openapi.json
 
 # ---------- MongoDB ----------
 mongo:

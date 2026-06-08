@@ -1,0 +1,2255 @@
+{
+  "components": {
+    "parameters": {
+      "Backend": {
+        "description": "Gateway selector for one exact backend id.",
+        "in": "query",
+        "name": "backend",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Cluster": {
+        "description": "Gateway selector. Use a concrete cluster for writes, admission, queries, and SSE; omit or use all for fan-out GET endpoints.",
+        "in": "query",
+        "name": "cluster",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "description": "Maximum number of items to return.",
+        "in": "query",
+        "name": "limit",
+        "required": false,
+        "schema": {
+          "default": 100,
+          "minimum": 1,
+          "type": "integer"
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "properties": {
+                "error": {
+                  "properties": {
+                    "message": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            }
+          }
+        },
+        "description": "Error response"
+      }
+    }
+  },
+  "info": {
+    "description": "Admission control, prefix-cache residency, KV-event observability, and configuration API.",
+    "title": "ucloud-kv-indexer Gateway API",
+    "version": "0.2.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/admin/connections": {
+      "get": {
+        "description": "Lists gateway backend connections. Tokens are redacted.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List backend connections",
+        "tags": [
+          "Gateway"
+        ]
+      },
+      "post": {
+        "description": "Creates or updates a kvindexer backend connection.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cluster": {
+                    "description": "Cluster this backend serves.",
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "description": "Whether this connection is enabled.",
+                    "type": "boolean"
+                  },
+                  "id": {
+                    "description": "Gateway backend id.",
+                    "type": "string"
+                  },
+                  "token": {
+                    "description": "Optional bearer token used by the gateway when calling this backend.",
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "Base URL of the kvindexer backend.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "cluster",
+                  "url"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Gateway connection",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create or update backend connection",
+        "tags": [
+          "Gateway"
+        ]
+      }
+    },
+    "/admin/connections/{id}": {
+      "delete": {
+        "description": "Deletes a gateway backend connection.",
+        "parameters": [
+          {
+            "description": "Resource identifier.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete backend connection",
+        "tags": [
+          "Gateway"
+        ]
+      }
+    },
+    "/clusters": {
+      "get": {
+        "description": "Lists configured clusters.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List clusters",
+        "tags": [
+          "Config"
+        ]
+      },
+      "post": {
+        "description": "Creates or replaces a cluster config.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cluster_id": {
+                    "description": "Cluster id.",
+                    "type": "string"
+                  },
+                  "display_name": {
+                    "description": "Human-readable name.",
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "description": "Whether the cluster is enabled.",
+                    "type": "boolean"
+                  },
+                  "environment": {
+                    "description": "Environment label.",
+                    "type": "string"
+                  },
+                  "labels": {
+                    "additionalProperties": true,
+                    "description": "Free-form labels.",
+                    "type": "object"
+                  },
+                  "maintenance_mode": {
+                    "description": "Whether the cluster is in maintenance mode.",
+                    "type": "boolean"
+                  },
+                  "region": {
+                    "description": "Region label.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cluster_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Cluster",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create or update cluster",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/clusters-health": {
+      "get": {
+        "description": "Groups configured backend connections by cluster and live-probes each backend.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Cluster backend health",
+        "tags": [
+          "Gateway"
+        ]
+      }
+    },
+    "/clusters/{id}": {
+      "patch": {
+        "description": "Hot-updates mutable cluster fields.",
+        "parameters": [
+          {
+            "description": "Resource identifier.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "display_name": {
+                    "description": "Human-readable name.",
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "description": "Whether the cluster is enabled.",
+                    "type": "boolean"
+                  },
+                  "labels": {
+                    "additionalProperties": true,
+                    "description": "Free-form labels.",
+                    "type": "object"
+                  },
+                  "maintenance_mode": {
+                    "description": "Whether the cluster is in maintenance mode.",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "description": "Cluster patch",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Patch cluster",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/config/audit-log": {
+      "get": {
+        "description": "Lists configuration mutations and profile version bumps.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Config audit log",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/config/effective-policy/preview": {
+      "post": {
+        "description": "Evaluates the priority-ordered rule list for a request shape. Rule conditions are AND clauses; rules are OR by priority.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "cluster_id": {
+                    "description": "Cluster scope to preview.",
+                    "type": "string"
+                  },
+                  "fresh": {
+                    "description": "Whether KV event signals are trusted for this preview. Defaults true.",
+                    "type": "boolean"
+                  },
+                  "has_candidates": {
+                    "description": "Whether at least one engine can serve the request. Defaults true.",
+                    "type": "boolean"
+                  },
+                  "hash_supported": {
+                    "description": "Whether the request features are hash-supported. Defaults true.",
+                    "type": "boolean"
+                  },
+                  "hit_ratio": {
+                    "description": "Synthetic KV hit ratio for previewing require_cache_hit actions.",
+                    "type": "number"
+                  },
+                  "input_tokens": {
+                    "description": "Input token count to test against token-count conditions.",
+                    "type": "integer"
+                  },
+                  "model_id": {
+                    "description": "Model scope to preview.",
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "description": "Tenant/customer/workspace scope to preview.",
+                    "type": "string"
+                  },
+                  "tokenized": {
+                    "description": "Whether tokenization succeeded for this preview. Defaults true.",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "description": "Rule preview request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Preview admission rules",
+        "tags": [
+          "Policies"
+        ]
+      }
+    },
+    "/config/versions": {
+      "get": {
+        "description": "Returns the current config version. On gateway, returns one item per backend.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Config versions",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/decisions": {
+      "get": {
+        "description": "Returns recent admission verdicts with reason, hit ratio, target, and config version.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Recent admission decisions",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/engines": {
+      "get": {
+        "description": "Lists registered inference engines.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List engines",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/engines/register": {
+      "post": {
+        "description": "Registers or replaces an inference engine and starts its KV-event listener if configured.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "api_endpoint": {
+                    "description": "OpenAI-compatible serving endpoint.",
+                    "type": "string"
+                  },
+                  "cluster_id": {
+                    "description": "Owning cluster id.",
+                    "type": "string"
+                  },
+                  "dp_ranks": {
+                    "description": "Number of data-parallel ranks.",
+                    "type": "integer"
+                  },
+                  "draining": {
+                    "description": "Whether this engine should stop receiving new work.",
+                    "type": "boolean"
+                  },
+                  "enabled": {
+                    "description": "Whether this engine is eligible.",
+                    "type": "boolean"
+                  },
+                  "engine_id": {
+                    "description": "Engine id.",
+                    "type": "string"
+                  },
+                  "framework": {
+                    "description": "Serving framework, for example vllm or sglang.",
+                    "type": "string"
+                  },
+                  "healthy": {
+                    "description": "Manual health flag.",
+                    "type": "boolean"
+                  },
+                  "kv_event_endpoint": {
+                    "description": "ZMQ KV-event endpoint for prefix-cache awareness.",
+                    "type": "string"
+                  },
+                  "labels": {
+                    "additionalProperties": true,
+                    "description": "Free-form labels.",
+                    "type": "object"
+                  },
+                  "max_model_len": {
+                    "description": "Model context length.",
+                    "type": "integer"
+                  },
+                  "max_num_seqs": {
+                    "description": "Max active sequences.",
+                    "type": "integer"
+                  },
+                  "replay_endpoint": {
+                    "description": "Optional KV replay endpoint.",
+                    "type": "string"
+                  },
+                  "served_models": {
+                    "description": "Model ids served by this engine.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "tokenizer_endpoint": {
+                    "description": "Tokenizer endpoint. Defaults to api_endpoint when omitted.",
+                    "type": "string"
+                  },
+                  "topic": {
+                    "description": "ZMQ topic, default kv-events.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "engine_id",
+                  "cluster_id",
+                  "framework",
+                  "served_models"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Engine",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Register engine",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/engines/unregister": {
+      "post": {
+        "description": "Removes an engine by engine_id.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "engine_id": {
+                    "description": "Engine identifier.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "engine_id"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Engine unregister request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Unregister engine",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/engines/{id}": {
+      "patch": {
+        "description": "Hot-updates mutable engine state such as enabled, draining, health, and queue depth.",
+        "parameters": [
+          {
+            "description": "Resource identifier.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "draining": {
+                    "description": "Whether this engine should stop receiving new work.",
+                    "type": "boolean"
+                  },
+                  "enabled": {
+                    "description": "Whether this engine is eligible.",
+                    "type": "boolean"
+                  },
+                  "healthy": {
+                    "description": "Manual health flag.",
+                    "type": "boolean"
+                  },
+                  "labels": {
+                    "additionalProperties": true,
+                    "description": "Free-form labels.",
+                    "type": "object"
+                  },
+                  "max_num_seqs": {
+                    "description": "Max active sequences.",
+                    "type": "integer"
+                  },
+                  "queue_depth": {
+                    "description": "Current serving queue depth.",
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          },
+          "description": "Engine patch",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Patch engine",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/event-streams": {
+      "get": {
+        "description": "Per-engine ZMQ listener connection, sequence, gap, decode, and queue health.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List KV-event listener health",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Liveness endpoint. It is not authenticated on kvindexer.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Health check",
+        "tags": [
+          "System"
+        ]
+      }
+    },
+    "/index/stats": {
+      "get": {
+        "description": "Lists request_key, bridge, engine, and last-event counts per namespace.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Residency index stats",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/kv-events/recent": {
+      "get": {
+        "description": "Returns recent decoded ZMQ KV-cache events. Query parameter limit defaults to 100.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Recent decoded KV events",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/kv-events/stream": {
+      "get": {
+        "description": "Server-Sent Events stream of decoded KV-cache events. Select exactly one backend or cluster through the gateway.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Live decoded KV-event stream",
+        "tags": [
+          "Observability"
+        ]
+      }
+    },
+    "/model-profiles": {
+      "get": {
+        "description": "Lists tokenization/hash profiles.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List model profiles",
+        "tags": [
+          "Config"
+        ]
+      },
+      "post": {
+        "description": "Creates a new profile version when hash-affecting fields change.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "aliases": {
+                    "description": "Optional aliases.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "block_size": {
+                    "description": "Prefix block size in tokens.",
+                    "type": "integer"
+                  },
+                  "framework": {
+                    "description": "Serving framework.",
+                    "type": "string"
+                  },
+                  "hash_profile": {
+                    "description": "Hash semantics profile.",
+                    "type": "string"
+                  },
+                  "hash_seed": {
+                    "description": "Hash seed for namespace isolation.",
+                    "type": "string"
+                  },
+                  "model_id": {
+                    "description": "Model id.",
+                    "type": "string"
+                  },
+                  "supports_cache_salt": {
+                    "description": "Whether cache salt is hash-supported.",
+                    "type": "boolean"
+                  },
+                  "supports_lora": {
+                    "description": "Whether LoRA requests are hash-supported.",
+                    "type": "boolean"
+                  },
+                  "supports_multimodal": {
+                    "description": "Whether multimodal requests are hash-supported.",
+                    "type": "boolean"
+                  },
+                  "tokenizer_endpoint": {
+                    "description": "Optional tokenizer endpoint override.",
+                    "type": "string"
+                  },
+                  "version": {
+                    "description": "Profile version.",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "model_id",
+                  "framework",
+                  "hash_profile",
+                  "block_size"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Model profile",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create or update model profile",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "description": "Returns this OpenAPI 3 document.",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "OpenAPI document",
+        "tags": [
+          "System"
+        ]
+      }
+    },
+    "/policies": {
+      "get": {
+        "description": "Lists admission policy rules.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List policy rules",
+        "tags": [
+          "Policies"
+        ]
+      },
+      "post": {
+        "description": "Creates or replaces a policy rule.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "action": {
+                    "allOf": [
+                      {
+                        "properties": {
+                          "min_hit_ratio": {
+                            "description": "Required KV hit ratio when type=require_cache_hit. 0.5 means 50%.",
+                            "type": "number"
+                          },
+                          "on_low_hit": {
+                            "description": "Outcome when cache hit ratio is below min_hit_ratio.",
+                            "enum": [
+                              "accept",
+                              "reject",
+                              "fallback_accept"
+                            ],
+                            "type": "string"
+                          },
+                          "on_uncertain": {
+                            "description": "Outcome when tokenization/hash/events/candidate signal is unavailable.",
+                            "enum": [
+                              "accept",
+                              "reject",
+                              "fallback_accept"
+                            ],
+                            "type": "string"
+                          },
+                          "reject_status": {
+                            "description": "HTTP status used for reject outcomes. Defaults to 429.",
+                            "type": "integer"
+                          },
+                          "type": {
+                            "description": "Action type.",
+                            "enum": [
+                              "accept",
+                              "reject",
+                              "require_cache_hit"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      }
+                    ],
+                    "description": "Action to execute when all conditions match."
+                  },
+                  "conditions": {
+                    "description": "AND conditions. Empty means match every request.",
+                    "items": {
+                      "properties": {
+                        "field": {
+                          "description": "Request/observability field to compare.",
+                          "enum": [
+                            "cluster_id",
+                            "model_id",
+                            "tenant_id",
+                            "input_tokens",
+                            "hit_ratio",
+                            "best_hit_tokens",
+                            "effective_cached_tokens",
+                            "kv_event_state",
+                            "tokenized",
+                            "hash_supported",
+                            "has_candidates"
+                          ],
+                          "type": "string"
+                        },
+                        "op": {
+                          "description": "Comparison operator.",
+                          "enum": [
+                            "eq",
+                            "neq",
+                            "in",
+                            "not_in",
+                            "gt",
+                            "gte",
+                            "lt",
+                            "lte",
+                            "contains"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {
+                          "description": "Comparison value. For in/not_in, pass an array."
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "op"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "enabled": {
+                    "description": "Whether this rule is enabled. Omitted means enabled.",
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "description": "Human-readable rule name.",
+                    "type": "string"
+                  },
+                  "priority": {
+                    "description": "Higher priority rules are evaluated first.",
+                    "type": "integer"
+                  },
+                  "rule_id": {
+                    "description": "Stable admission rule id.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rule_id",
+                  "action"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Policy",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create or update policy rule",
+        "tags": [
+          "Policies"
+        ]
+      }
+    },
+    "/policies/{id}": {
+      "delete": {
+        "description": "Deletes a policy rule.",
+        "parameters": [
+          {
+            "description": "Resource identifier.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete policy rule",
+        "tags": [
+          "Policies"
+        ]
+      },
+      "patch": {
+        "description": "Updates selected fields on a policy rule.",
+        "parameters": [
+          {
+            "description": "Resource identifier.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "action": {
+                    "allOf": [
+                      {
+                        "properties": {
+                          "min_hit_ratio": {
+                            "description": "Required KV hit ratio when type=require_cache_hit. 0.5 means 50%.",
+                            "type": "number"
+                          },
+                          "on_low_hit": {
+                            "description": "Outcome when cache hit ratio is below min_hit_ratio.",
+                            "enum": [
+                              "accept",
+                              "reject",
+                              "fallback_accept"
+                            ],
+                            "type": "string"
+                          },
+                          "on_uncertain": {
+                            "description": "Outcome when tokenization/hash/events/candidate signal is unavailable.",
+                            "enum": [
+                              "accept",
+                              "reject",
+                              "fallback_accept"
+                            ],
+                            "type": "string"
+                          },
+                          "reject_status": {
+                            "description": "HTTP status used for reject outcomes. Defaults to 429.",
+                            "type": "integer"
+                          },
+                          "type": {
+                            "description": "Action type.",
+                            "enum": [
+                              "accept",
+                              "reject",
+                              "require_cache_hit"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      }
+                    ],
+                    "description": "Action to execute when all conditions match."
+                  },
+                  "conditions": {
+                    "description": "AND conditions. Empty means match every request.",
+                    "items": {
+                      "properties": {
+                        "field": {
+                          "description": "Request/observability field to compare.",
+                          "enum": [
+                            "cluster_id",
+                            "model_id",
+                            "tenant_id",
+                            "input_tokens",
+                            "hit_ratio",
+                            "best_hit_tokens",
+                            "effective_cached_tokens",
+                            "kv_event_state",
+                            "tokenized",
+                            "hash_supported",
+                            "has_candidates"
+                          ],
+                          "type": "string"
+                        },
+                        "op": {
+                          "description": "Comparison operator.",
+                          "enum": [
+                            "eq",
+                            "neq",
+                            "in",
+                            "not_in",
+                            "gt",
+                            "gte",
+                            "lt",
+                            "lte",
+                            "contains"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {
+                          "description": "Comparison value. For in/not_in, pass an array."
+                        }
+                      },
+                      "required": [
+                        "field",
+                        "op"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "enabled": {
+                    "description": "Whether this rule is enabled. Omitted means enabled.",
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "description": "Human-readable rule name.",
+                    "type": "string"
+                  },
+                  "priority": {
+                    "description": "Higher priority rules are evaluated first.",
+                    "type": "integer"
+                  },
+                  "rule_id": {
+                    "description": "Stable admission rule id.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rule_id",
+                  "action"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Policy patch",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Patch policy rule",
+        "tags": [
+          "Policies"
+        ]
+      }
+    },
+    "/query-prefix": {
+      "post": {
+        "description": "Mooncake/Dynamo-style per-instance prefix hit query. Accepts model plus token_ids, or model plus prompt.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "block_size": {
+                    "description": "Optional override for profile block size.",
+                    "type": "integer"
+                  },
+                  "model": {
+                    "description": "Model name used to resolve profile/namespace.",
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "description": "Plain prompt to tokenize when token_ids are not provided.",
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "description": "Optional tenant id.",
+                    "type": "string"
+                  },
+                  "token_ids": {
+                    "description": "Token ids to query. If omitted, prompt is tokenized by the engine.",
+                    "items": {
+                      "format": "int32",
+                      "type": "integer"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "model"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Prefix query request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Query prefix cache hits",
+        "tags": [
+          "Prefix"
+        ]
+      }
+    },
+    "/route": {
+      "post": {
+        "description": "Alias of /v1/chat/completions for admission judgment.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "max_tokens": {
+                    "description": "Optional generation limit; accepted for compatibility.",
+                    "type": "integer"
+                  },
+                  "messages": {
+                    "description": "OpenAI chat messages.",
+                    "items": {
+                      "properties": {
+                        "content": {},
+                        "role": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "model": {
+                    "description": "Model name, for example qwen3.5-4b.",
+                    "type": "string"
+                  },
+                  "temperature": {
+                    "description": "Optional sampling temperature; accepted for compatibility.",
+                    "type": "number"
+                  },
+                  "tenant_id": {
+                    "description": "Optional business tenant/customer/workspace id used for policy matching.",
+                    "type": "string"
+                  },
+                  "tools": {
+                    "description": "Optional OpenAI tool definitions.",
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "model",
+                  "messages"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "OpenAI-compatible chat request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Judge OpenAI chat admission",
+        "tags": [
+          "Admission"
+        ]
+      }
+    },
+    "/tokenize/preview": {
+      "post": {
+        "description": "Shows normalized tokens and request_keys for a protocol request.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "model": {
+                    "description": "Model name.",
+                    "type": "string"
+                  },
+                  "protocol": {
+                    "description": "Protocol id: openai.chat, openai.responses, or anthropic.messages.",
+                    "type": "string"
+                  },
+                  "raw": {
+                    "additionalProperties": true,
+                    "description": "Original protocol request body.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "model",
+                  "protocol",
+                  "raw"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Tokenization preview request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Preview tokenization",
+        "tags": [
+          "Prefix"
+        ]
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "description": "Normalizes and tokenizes an OpenAI chat request, queries prefix residency, and applies policy. It judges; it does not proxy generation.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "max_tokens": {
+                    "description": "Optional generation limit; accepted for compatibility.",
+                    "type": "integer"
+                  },
+                  "messages": {
+                    "description": "OpenAI chat messages.",
+                    "items": {
+                      "properties": {
+                        "content": {},
+                        "role": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "model": {
+                    "description": "Model name, for example qwen3.5-4b.",
+                    "type": "string"
+                  },
+                  "temperature": {
+                    "description": "Optional sampling temperature; accepted for compatibility.",
+                    "type": "number"
+                  },
+                  "tenant_id": {
+                    "description": "Optional business tenant/customer/workspace id used for policy matching.",
+                    "type": "string"
+                  },
+                  "tools": {
+                    "description": "Optional OpenAI tool definitions.",
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "model",
+                  "messages"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "OpenAI-compatible chat request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Judge OpenAI chat admission",
+        "tags": [
+          "Admission"
+        ]
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "description": "Admission judgment for Anthropic Messages-compatible requests.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "max_tokens": {
+                    "description": "Anthropic max_tokens.",
+                    "type": "integer"
+                  },
+                  "messages": {
+                    "description": "Anthropic messages.",
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "model": {
+                    "description": "Model name.",
+                    "type": "string"
+                  },
+                  "system": {
+                    "description": "Optional system prompt.",
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "description": "Optional business tenant/customer/workspace id used for policy matching.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "model",
+                  "messages"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "Anthropic Messages-compatible request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Judge Anthropic messages admission",
+        "tags": [
+          "Admission"
+        ]
+      }
+    },
+    "/v1/responses": {
+      "post": {
+        "description": "Admission judgment for OpenAI Responses-compatible requests.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "input": {
+                    "description": "Responses API input. Object/array inputs are accepted by compatible clients but omitted from this compact schema.",
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "Model name.",
+                    "type": "string"
+                  },
+                  "tenant_id": {
+                    "description": "Optional business tenant/customer/workspace id used for policy matching.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "model",
+                  "input"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "description": "OpenAI Responses-compatible request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Judge OpenAI responses admission",
+        "tags": [
+          "Admission"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Admission"
+    },
+    {
+      "name": "Prefix"
+    },
+    {
+      "name": "Config"
+    },
+    {
+      "name": "Policies"
+    },
+    {
+      "name": "Observability"
+    },
+    {
+      "name": "Gateway"
+    },
+    {
+      "name": "System"
+    }
+  ]
+}

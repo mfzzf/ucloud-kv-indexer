@@ -12,6 +12,12 @@ import (
 
 // Router builds the HTTP router with all endpoints registered.
 func (s *Service) Router() http.Handler {
+	// CORS is outermost (so OPTIONS preflight never needs the token); auth sits
+	// just inside it and gates every route except /healthz (liveness probe).
+	return withCORS(s.withAuth(s.ginRouter()))
+}
+
+func (s *Service) ginRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -61,9 +67,7 @@ func (s *Service) Router() http.Handler {
 		c.JSON(http.StatusOK, openapi.KVIndexerSpec())
 	})
 
-	// CORS is outermost (so OPTIONS preflight never needs the token); auth sits
-	// just inside it and gates every route except /healthz (liveness probe).
-	return withCORS(s.withAuth(r))
+	return r
 }
 
 func httpHandler(h http.HandlerFunc, pathParams ...string) gin.HandlerFunc {

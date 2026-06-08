@@ -430,6 +430,10 @@ func authorize(req *http.Request, b Backend) {
 
 // Router wires the federation endpoints + CORS.
 func (g *Gateway) Router() http.Handler {
+	return withCORS(g.ginRouter())
+}
+
+func (g *Gateway) ginRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -486,7 +490,7 @@ func (g *Gateway) Router() http.Handler {
 	r.POST("/tokenize/preview", httpHandler(g.proxyOne))
 	r.POST("/config/effective-policy/preview", httpHandler(g.proxyOne))
 
-	return withCORS(r)
+	return r
 }
 
 func httpHandler(h http.HandlerFunc, pathParams ...string) gin.HandlerFunc {
