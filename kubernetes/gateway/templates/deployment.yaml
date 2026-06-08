@@ -36,7 +36,7 @@ spec:
           args:
             - -addr={{ .Values.gateway.listenAddress }}
             - -store={{ .Values.gateway.store }}
-{{- if .Values.gateway.configFiles }}
+{{- if and .Values.bootstrap.enabled .Values.gateway.configFiles }}
 {{- $paths := list }}
 {{- range .Values.gateway.configFiles }}
 {{- $paths = append $paths (printf "/etc/kvindexer/bootstrap/%s" .) }}
@@ -73,11 +73,15 @@ spec:
           resources:
 {{ toYaml . | indent 12 }}
 {{- end }}
+{{- if .Values.bootstrap.enabled }}
           volumeMounts:
             - name: bootstrap
               mountPath: /etc/kvindexer/bootstrap
               readOnly: true
+{{- end }}
+{{- if .Values.bootstrap.enabled }}
       volumes:
         - name: bootstrap
           configMap:
             name: {{ include "ucloud-kv-gateway.bootstrapName" . }}
+{{- end }}

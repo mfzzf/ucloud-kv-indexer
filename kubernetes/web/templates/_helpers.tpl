@@ -3,7 +3,7 @@
 {{- end -}}
 
 {{- define "ucloud-kv-web.namespace" -}}
-{{- default .Release.Namespace .Values.namespace.name -}}
+ucloud-kv-indexers
 {{- end -}}
 
 {{- define "ucloud-kv-web.name" -}}

@@ -72,7 +72,7 @@ MONGO_DB_VLLM      := kvindexer_local_vllm
 MONGO_DB_SGLANG    := kvindexer_local_sglang
 
 # --- container image ---
-IMAGE              := uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer:latest
+IMAGE              := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer:latest
 WEB_IMAGE          := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web:latest
 
 # Bearer token for the gateway↔kvindexer hop (crosses the network in prod). For

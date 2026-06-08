@@ -41,13 +41,14 @@ docker push uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web:latest
 
 The Go image contains both `/usr/local/bin/kvgateway` and
 `/usr/local/bin/kvindexer`; the gateway/indexer charts select the right command.
+All charts render workload resources into the existing `ucloud-kv-indexers`
+namespace and do not create the namespace.
 
 Install the gateway chart in the central control-plane cluster:
 
 ```sh
 helm upgrade --install ucloud-kv-gateway ./kubernetes/gateway \
-  --namespace ucloud-kv-gateway \
-  --create-namespace \
+  --namespace ucloud-kv-indexers \
   --set image.repository=uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer \
   --set image.tag=latest
 ```
@@ -76,7 +77,6 @@ multiple indexers:
 ```sh
 helm upgrade --install ucloud-kv-indexers ./kubernetes/indexer \
   --namespace ucloud-kv-indexers \
-  --create-namespace \
   --set image.repository=uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer \
   --set image.tag=latest
 ```
@@ -102,13 +102,11 @@ Examples are included under `indexer/regions/`:
 
 ```sh
 helm upgrade --install kvindexer-cn-shanghai ./kubernetes/indexer \
-  --namespace kv-cn-shanghai \
-  --create-namespace \
+  --namespace ucloud-kv-indexers \
   -f ./kubernetes/indexer/regions/cn-shanghai/values.yaml
 
 helm upgrade --install kvindexer-cn-guangzhou ./kubernetes/indexer \
-  --namespace kv-cn-guangzhou \
-  --create-namespace \
+  --namespace ucloud-kv-indexers \
   -f ./kubernetes/indexer/regions/cn-guangzhou/values.yaml
 ```
 
@@ -121,11 +119,10 @@ Install the web chart where it can reach the gateway Service:
 
 ```sh
 helm upgrade --install ucloud-kv-web ./kubernetes/web \
-  --namespace ucloud-kv-web \
-  --create-namespace \
+  --namespace ucloud-kv-indexers \
   --set image.repository=uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web \
   --set image.tag=latest \
-  --set web.gatewayBaseURL=http://kvgateway.ucloud-kv-gateway.svc.cluster.local:8095
+  --set web.gatewayBaseURL=http://kvgateway.ucloud-kv-indexers.svc.cluster.local:8095
 ```
 
 The browser talks to the web service only. The Next.js server proxies

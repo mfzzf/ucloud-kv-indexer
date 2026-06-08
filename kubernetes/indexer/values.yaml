@@ -1,9 +1,5 @@
-namespace:
-  create: true
-  name: ucloud-kv-indexers
-
 image:
-  repository: uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer
+  repository: uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer
   tag: latest
   pullPolicy: IfNotPresent
 
