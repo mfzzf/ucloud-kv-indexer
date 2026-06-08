@@ -1,7 +1,7 @@
 image:
   repository: uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 web:
   name: ucloud-kv-web

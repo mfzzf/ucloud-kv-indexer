@@ -1,7 +1,7 @@
 image:
   repository: uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 secrets:
   create: true
