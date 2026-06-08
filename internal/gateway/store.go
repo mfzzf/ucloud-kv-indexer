@@ -3,6 +3,7 @@ package gateway
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/url"
 	"sync"
 
@@ -34,10 +35,10 @@ const (
 	dialectMySQL  connStoreDialect = "mysql"
 )
 
-// ConnStore is a SQL-backed registry of kvindexer connections. It is the
-// gateway's source of truth after first seed; the admin API mutates it and the
-// gateway reads an in-memory snapshot refreshed on every write. Local dev uses
-// SQLite; Kubernetes/production should use MySQL.
+// ConnStore is a SQL-backed registry of kvindexer connections. The database is
+// the cross-pod source of truth after first seed; read paths refresh the local
+// snapshot from the database so multiple gateway replicas converge without a
+// restart. Local dev uses SQLite; Kubernetes/production should use MySQL.
 type ConnStore struct {
 	db      *sql.DB
 	dialect connStoreDialect
@@ -127,6 +128,7 @@ func (s *ConnStore) Description() string {
 
 // Count returns the number of stored connections (any enabled state).
 func (s *ConnStore) Count() int {
+	s.reloadBestEffort()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.cache)
@@ -160,6 +162,7 @@ func (s *ConnStore) SeedIfEmpty(conns []Connection) (bool, error) {
 
 // List returns a snapshot copy of all connections.
 func (s *ConnStore) List() []Connection {
+	s.reloadBestEffort()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]Connection, len(s.cache))
@@ -170,6 +173,7 @@ func (s *ConnStore) List() []Connection {
 // Backends returns the enabled connections as gateway Backends (the active set
 // the gateway federates).
 func (s *ConnStore) Backends() []Backend {
+	s.reloadBestEffort()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []Backend
@@ -255,6 +259,12 @@ func (s *ConnStore) reload() error {
 	s.cache = cs
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *ConnStore) reloadBestEffort() {
+	if err := s.reload(); err != nil {
+		log.Printf("gateway %s: refresh connection registry failed: %v", s.dialect, err)
+	}
 }
 
 func b2i(b bool) int {

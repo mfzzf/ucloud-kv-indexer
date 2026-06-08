@@ -1,6 +1,6 @@
 ARG GO_VERSION=1.25
 
-FROM golang:${GO_VERSION}-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
 
 WORKDIR /src
 
@@ -10,8 +10,8 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 ENV CGO_ENABLED=0
 

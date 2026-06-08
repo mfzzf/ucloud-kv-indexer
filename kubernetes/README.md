@@ -37,8 +37,7 @@ kubernetes/
 Build and push the shared control-plane image first:
 
 ```sh
-docker build -t uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer:latest .
-docker push uhub.service.ucloud.cn/uminfer/ucloud-kv-indexer:latest
+make image
 
 docker build -f web/Dockerfile -t uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web:latest web
 docker push uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web:latest

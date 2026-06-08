@@ -74,6 +74,7 @@ MONGO_DB_SGLANG    := kvindexer_local_sglang
 # --- container image ---
 IMAGE              := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer:latest
 WEB_IMAGE          := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web:latest
+IMAGE_PLATFORMS    := linux/amd64,linux/arm64
 
 # Bearer token for the gateway↔kvindexer hop (crosses the network in prod). For
 # local dev a fixed dev token is fine; override with `make up AUTH_TOKEN=...`.
@@ -111,7 +112,7 @@ define stop-svc
 	rm -f $(RUN)/$(1).pid
 endef
 
-.PHONY: help build build-go build-web image image-web images test \
+.PHONY: help build build-go build-web image image-local image-web images test \
         up down restart status logs clean clean-mongo smoke \
         backend-vllm backend-sglang gateway frontend \
         mongo stop-mongo mongo-status \
@@ -125,7 +126,8 @@ help:
 	@echo "  make inference   start Mooncake + vLLM + SGLang engines (separate lifecycle)"
 	@echo "  make inference-vllm start Mooncake + vLLM only"
 	@echo "  make build       compile Go binaries + web production build"
-	@echo "  make image       build Docker image (override with IMAGE=repo/name:tag)"
+	@echo "  make image       build+push multi-arch Docker image (override IMAGE=repo/name:tag IMAGE_PLATFORMS=linux/amd64,linux/arm64)"
+	@echo "  make image-local build local-arch Docker image only"
 	@echo "  make image-web   build frontend Docker image (override with WEB_IMAGE=repo/name:tag)"
 	@echo "  make up          start MongoDB + gateway + both kvindexer backends + frontend"
 	@echo "  make down        stop the control plane (inference untouched)"
@@ -157,7 +159,11 @@ build-web:
 	cd $(ROOT)/web && PATH="$(NODE_BIN):$$PATH" $(NPM) run build
 
 image:
-	@echo "==> building Docker image $(IMAGE)"
+	@echo "==> building and pushing Docker image $(IMAGE) for $(IMAGE_PLATFORMS)"
+	cd $(ROOT) && $(DOCKER) buildx build --platform $(IMAGE_PLATFORMS) --provenance=false -t $(IMAGE) --push .
+
+image-local:
+	@echo "==> building local-arch Docker image $(IMAGE)"
 	cd $(ROOT) && $(DOCKER) build -t $(IMAGE) .
 
 image-web:

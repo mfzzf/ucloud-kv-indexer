@@ -2,9 +2,9 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Activity, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { api, Cluster, Engine, IndexerConnection } from "@/lib/api";
+import { api, Cluster, ClusterInfo, Engine, IndexerConnection } from "@/lib/api";
 import { useCluster, clusterQ, backendQ } from "@/lib/cluster";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -262,6 +262,9 @@ function IndexerConnectionsPanel({
   const [editing, setEditing] = React.useState<IndexerConnection | null>(null);
   const [form, setForm] = React.useState<ConnectionDraft>(emptyConnectionDraft);
   const [err, setErr] = React.useState("");
+  const [healthChecks, setHealthChecks] = React.useState<
+    Record<string, { ok: boolean; message: string; checkedAt: string }>
+  >({});
 
   const refreshRegistry = React.useCallback(() => {
     qc.invalidateQueries({ queryKey: ["indexer-connections"] });
@@ -304,6 +307,54 @@ function IndexerConnectionsPanel({
     onSuccess: refreshRegistry,
     onError: (e: Error) =>
       toast.error(t("indexers.toast.update_failed"), { description: e.message }),
+  });
+
+  const checkHealth = useMutation({
+    mutationFn: async (c: IndexerConnection) => {
+      const groups = await api.get<ClusterInfo[]>("/clusters-health");
+      const backend = groups
+        .flatMap((group) =>
+          group.backends.map((backend) => ({
+            ...backend,
+            cluster: group.cluster,
+          })),
+        )
+        .find((backend) => backend.id === c.id);
+      if (!backend) {
+        throw new Error(t("indexers.health.missing"));
+      }
+      if (!backend.healthy) {
+        throw new Error(backend.error || t("indexers.health.unhealthy"));
+      }
+      return {
+        connection: c,
+        message: t("indexers.health.ok_detail", { url: backend.url }),
+      };
+    },
+    onSuccess: ({ connection, message }) => {
+      setHealthChecks((prev) => ({
+        ...prev,
+        [connection.id]: {
+          ok: true,
+          message,
+          checkedAt: new Date().toLocaleTimeString(),
+        },
+      }));
+      toast.success(t("indexers.health.ok_toast", { id: connection.id }));
+    },
+    onError: (e: Error, c) => {
+      setHealthChecks((prev) => ({
+        ...prev,
+        [c.id]: {
+          ok: false,
+          message: e.message,
+          checkedAt: new Date().toLocaleTimeString(),
+        },
+      }));
+      toast.error(t("indexers.health.fail_toast", { id: c.id }), {
+        description: e.message,
+      });
+    },
   });
 
   const openNew = () => {
@@ -455,6 +506,7 @@ function IndexerConnectionsPanel({
                 <TableHead>{t("indexers.col.url")}</TableHead>
                 <TableHead>{t("indexers.col.token")}</TableHead>
                 <TableHead>{t("indexers.col.state")}</TableHead>
+                <TableHead>{t("indexers.col.health")}</TableHead>
                 <TableHead className="pr-6 text-right">
                   {t("indexers.col.actions")}
                 </TableHead>
@@ -488,8 +540,45 @@ function IndexerConnectionsPanel({
                       </span>
                     </div>
                   </TableCell>
+                  <TableCell>
+                    {healthChecks[c.id] ? (
+                      <div className="flex max-w-[240px] flex-col gap-1">
+                        <Badge
+                          variant={healthChecks[c.id].ok ? "success" : "destructive"}
+                        >
+                          {healthChecks[c.id].ok
+                            ? t("indexers.health.ok")
+                            : t("indexers.health.failed")}
+                        </Badge>
+                        <span className="text-muted-foreground truncate text-xs">
+                          {healthChecks[c.id].checkedAt} ·{" "}
+                          {healthChecks[c.id].message}
+                        </span>
+                      </div>
+                    ) : (
+                      <Badge variant="outline">{t("indexers.health.unknown")}</Badge>
+                    )}
+                  </TableCell>
                   <TableCell className="pr-6">
                     <div className="flex justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={
+                          !c.enabled ||
+                          (checkHealth.isPending &&
+                            checkHealth.variables?.id === c.id)
+                        }
+                        onClick={() => checkHealth.mutate(c)}
+                      >
+                        {checkHealth.isPending &&
+                        checkHealth.variables?.id === c.id ? (
+                          <Loader2 data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <Activity data-icon="inline-start" />
+                        )}
+                        {t("indexers.btn.check")}
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline"

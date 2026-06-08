@@ -1,3 +1,8 @@
+image:
+  repository: uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer
+  tag: latest
+  pullPolicy: Always
+
 bootstrap:
   files:
     th-gb200.yaml: |

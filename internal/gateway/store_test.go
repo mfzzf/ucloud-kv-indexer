@@ -75,6 +75,35 @@ func TestConnStoreSeedOnceAndCRUD(t *testing.T) {
 	}
 }
 
+func TestConnStoreRefreshesAcrossInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared.db")
+	a, err := OpenConnStore(path)
+	if err != nil {
+		t.Fatalf("open a: %v", err)
+	}
+	defer a.Close()
+	b, err := OpenConnStore(path)
+	if err != nil {
+		t.Fatalf("open b: %v", err)
+	}
+	defer b.Close()
+
+	if err := a.Upsert(Connection{ID: "idx-0", Cluster: "th-gb200", URL: "http://10.0.0.1:8090", Token: "tok", Enabled: true}); err != nil {
+		t.Fatalf("upsert a: %v", err)
+	}
+	got := b.Backends()
+	if len(got) != 1 || got[0].ID != "idx-0" || got[0].Token != "tok" {
+		t.Fatalf("store b did not observe store a upsert: %+v", got)
+	}
+
+	if err := a.Delete("idx-0"); err != nil {
+		t.Fatalf("delete a: %v", err)
+	}
+	if got := b.Backends(); len(got) != 0 {
+		t.Fatalf("store b did not observe store a delete: %+v", got)
+	}
+}
+
 // TestConnStoreValidation rejects rows missing required fields or with a
 // malformed URL (no scheme/host).
 func TestConnStoreValidation(t *testing.T) {
