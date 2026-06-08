@@ -70,7 +70,8 @@ spec:
               command:
                 - sh
                 - -c
-                - mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
+                - >-
+                  mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 5
@@ -79,7 +80,8 @@ spec:
               command:
                 - sh
                 - -c
-                - mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
+                - >-
+                  mongosh --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 }).ok' | grep 1
             initialDelaySeconds: 60
             periodSeconds: 20
             timeoutSeconds: 5
