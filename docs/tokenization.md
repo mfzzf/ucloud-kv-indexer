@@ -75,9 +75,24 @@ create_tokenize(TokenizeChatRequest)
 ## 3. SGLang 的 `/tokenize`
 
 ### 接口
-- 路由：`POST /v1/tokenize` 与 `POST /tokenize`（两者等价，`http_server.py:1526/1531`）
-- 请求是**单个** `TokenizeRequest`，用 validator 强制 `prompt` / `messages` 二选一
+- 路由：`POST /v1/tokenize` 与 `POST /tokenize`（新版本两者等价，`http_server.py:1526/1531`）；
+  indexer 对 SGLang chat tokenization 默认使用 `/v1/tokenize`。
+- **版本边界**：chat 形式的 `messages` 支持来自 SGLang `27445f9836`
+  (`Add ChatCompletionRequest-style support to /v1/tokenize`, PR #23981)，进入 `v0.5.12+`。
+  `v0.5.11` 及更老版本的 `TokenizeRequest` 只有 `prompt: Union[str, List[str]]` 必填。
+- 请求是**单个** `TokenizeRequest`，新版本用 validator 强制 `prompt` / `messages` 二选一
   （`protocol.py:1152-1176`）
+
+如果看到类似下面的错误：
+
+```json
+{"message":"1 validation error:\n  {'type':'missing','loc':('body','prompt'),'msg':'Field required', ...}"}
+```
+
+说明当前 SGLang 构建仍是 prompt-only `/tokenize` schema。indexer 不能把 chat 请求退化为
+普通 `prompt` 字符串，因为那会要求本地复制目标模型的 chat template，算出的 token_ids 很容易
+和引擎实际缓存的 KV 前缀不一致。正确处理是升级 SGLang 到 `v0.5.12+`，或使用包含
+`27445f9836` / PR #23981 的 DeepSeek-V4 分支构建。
 
 ### chat 形式（`TokenizeRequest` with `messages`）
 ```jsonc
@@ -220,7 +235,7 @@ indexer 的转换器**直接照搬引擎自己的转换器**，保证产出的 m
    唯一例外是 `"none"`，会让引擎跳过渲染 tools（`serving_chat.py:477`：`request.tools and
    request.tool_choice != "none"`）。所以三个转换器在 `tool_choice == "none"` 时**丢弃
    tools**，其余情况不转发 `tool_choice`，避免把 Responses 形态的 `tool_choice` 发给
-   SGLang 触发校验错误 → tokenize 失败 → fallback。这也意味着 `client.go` 无需新增字段。
+   SGLang 触发校验错误 → tokenize 失败 → fallback。
 2. **生成的 tool-call id 用确定性计数器**（`call_0` / `function_call_0` …），而非 SGLang
    的 `uuid4().hex`。KV-cache indexer **必须**让相同请求 tokenize 出相同结果，随机 id 会
    破坏这一点（同一请求两次算出不同 token → request_key 不稳）。
@@ -228,9 +243,10 @@ indexer 的转换器**直接照搬引擎自己的转换器**，保证产出的 m
 ### 5.6 client 发送形态（`client.go`）
 `chatRequest` 已携带 `Messages []types.ChatMessage` + `Tools []any` +
 `add_generation_prompt:true`。`json.Marshal` 会自动序列化扩展后的 `ChatMessage`
-（`tool_calls`、`tool_call_id`，arguments 为 JSON 字符串）。**无需改 client**——这正好
-同时满足 vLLM 和 SGLang 的 chat schema（两者都接受 `messages` / `tools` /
-`add_generation_prompt`；SGLang 独有的 `tool_choice` 我们不发，vLLM 没有的字段我们也不发）。
+（`tool_calls`、`tool_call_id`，arguments 为 JSON 字符串）。client 会按框架选择路径：
+vLLM 走 `/tokenize`，SGLang 走 `/v1/tokenize`。payload 同时满足 vLLM 和 SGLang `v0.5.12+`
+的 chat schema（两者都接受 `messages` / `tools` / `add_generation_prompt`；SGLang 独有的
+`tool_choice` 我们不发，vLLM 没有的字段我们也不发）。
 
 ---
 
@@ -306,7 +322,7 @@ request_key 链 → 查 residency index → 命中判断。该流程在
 
 | 维度 | vLLM | SGLang | indexer |
 |---|---|---|---|
-| chat `/tokenize` 接受结构化 messages | ✅ | ✅ | ✅ 直接转发 |
+| chat `/tokenize` 接受结构化 messages | ✅ | ✅（SGLang `v0.5.12+` / PR #23981） | ✅ 直接转发 |
 | `messages` / `tools` / `add_generation_prompt` | ✅ | ✅ | ✅ client 发这三项 |
 | `tool_choice` | 无 | 有 | 不发（除 `none` 丢 tools）|
 | tool_calls.arguments 为 JSON 字符串 | ✅ 引擎再解析 | ✅ 引擎再解析 | ✅ Anthropic 编码 / Responses 透传 |

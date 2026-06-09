@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ucloud/kv-indexer/internal/normalize"
+	"github.com/ucloud/kv-indexer/internal/types"
 )
 
 // fakeTokenizeServer echoes back a fixed token list and captures the request
@@ -21,6 +23,50 @@ func fakeTokenizeServer(t *testing.T, captured *[]byte) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"tokens":[1,2,3],"count":3,"max_model_len":8192}`))
 	}))
+}
+
+func TestTokenizeChatSGLangUsesV1TokenizeByDefault(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tokens":[1],"count":1,"max_model_len":8192}`))
+	}))
+	defer srv.Close()
+
+	cli := New()
+	_, err := cli.TokenizeChatSGLang(context.Background(), srv.URL, "m", []types.ChatMessage{
+		{Role: "user", Content: "hi"},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/v1/tokenize" {
+		t.Fatalf("SGLang chat tokenize path: got %q, want /v1/tokenize", gotPath)
+	}
+}
+
+func TestTokenizeChatLegacySGLangErrorIsActionable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"object":"error","message":"1 validation error:\n  {'type': 'missing', 'loc': ('body', 'prompt'), 'msg': 'Field required'}","type":"BadRequestError","code":400}`))
+	}))
+	defer srv.Close()
+
+	cli := New()
+	_, err := cli.TokenizeChatSGLang(context.Background(), srv.URL, "m", []types.ChatMessage{
+		{Role: "user", Content: "hi"},
+	}, nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"v0.5.12+", "27445f9836", "/v1/tokenize accepts messages"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error missing %q:\n%s", want, msg)
+		}
+	}
 }
 
 // TestTokenizeChatForwardsStructuredAnthropic verifies that an Anthropic

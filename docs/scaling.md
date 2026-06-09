@@ -249,7 +249,7 @@ clusters:
       - model_id: qwen3
         block_size: 1
         hash_seed: "0"
-        tokenizer_endpoint: http://10.0.0.1:30000
+        tokenizer_endpoint: http://10.0.0.1:30000/v1/tokenize
     engines:
       - { engine_id: sglang-h20-1-0, kv_event_endpoint: tcp://10.0.0.1:5557, replay_endpoint: tcp://10.0.0.1:5558, topic: kv-events, served_models: [qwen3] }
       - { engine_id: sglang-h20-1-1, kv_event_endpoint: tcp://10.0.0.1:5559, replay_endpoint: tcp://10.0.0.1:5560, topic: kv-events, served_models: [qwen3] }

@@ -155,7 +155,7 @@ func (s *Service) handleTokenizePreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
-	res, err := s.Tokenizer.TokenizeChat(ctx, ep, prof.ModelID, rr.Messages, rr.Tools, nil)
+	res, err := s.tokenize(ctx, prof, ep, rr)
 	cancel()
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "tokenize: "+err.Error())

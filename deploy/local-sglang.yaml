@@ -12,11 +12,11 @@ clusters:
       - model_id: qwen3-0.6b
         block_size: 64
         hash_seed: "0"
-        tokenizer_endpoint: http://127.0.0.1:30000
+        tokenizer_endpoint: http://127.0.0.1:30000/v1/tokenize
     engines:
       - engine_id: sglang-local-0
         api_endpoint: http://127.0.0.1:30000
-        tokenizer_endpoint: http://127.0.0.1:30000
+        tokenizer_endpoint: http://127.0.0.1:30000/v1/tokenize
         kv_event_endpoint: tcp://127.0.0.1:5557
         replay_endpoint: tcp://127.0.0.1:5558
         topic: kv-events

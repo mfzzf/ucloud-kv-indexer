@@ -10,6 +10,7 @@ import (
 	"github.com/ucloud/kv-indexer/internal/config"
 	"github.com/ucloud/kv-indexer/internal/normalize"
 	"github.com/ucloud/kv-indexer/internal/residency"
+	"github.com/ucloud/kv-indexer/internal/tokenizer"
 	"github.com/ucloud/kv-indexer/internal/types"
 )
 
@@ -296,7 +297,15 @@ func profileTokenizerEndpoint(prof config.ModelProfile, engines []config.Engine)
 func (s *Service) tokenize(ctx context.Context, prof config.ModelProfile, endpoint string, rr *types.RouteRequest) (*tokenizeResult, error) {
 	// We always use the chat form because the normalizer produces a unified
 	// message list; the engine applies its own chat template.
-	res, err := s.Tokenizer.TokenizeChat(ctx, endpoint, prof.ModelID, rr.Messages, rr.Tools, nil)
+	var (
+		res *tokenizer.Result
+		err error
+	)
+	if prof.Framework == config.FrameworkSGLang {
+		res, err = s.Tokenizer.TokenizeChatSGLang(ctx, endpoint, prof.ModelID, rr.Messages, rr.Tools, nil)
+	} else {
+		res, err = s.Tokenizer.TokenizeChat(ctx, endpoint, prof.ModelID, rr.Messages, rr.Tools, nil)
+	}
 	if err != nil {
 		return nil, err
 	}

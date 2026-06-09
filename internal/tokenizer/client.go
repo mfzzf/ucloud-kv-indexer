@@ -59,13 +59,24 @@ type completionRequest struct {
 	AddSpecialTokens bool   `json:"add_special_tokens"`
 }
 
-// normalizeEndpoint ensures we hit the /tokenize path of the given base URL.
+// normalizeEndpoint ensures we hit the vLLM-compatible /tokenize path of the
+// given base URL.
 func normalizeEndpoint(base string) string {
+	return normalizeEndpointPath(base, "/tokenize")
+}
+
+// normalizeOpenAIEndpoint ensures we hit SGLang's documented OpenAI
+// /v1/tokenize path of the given base URL.
+func normalizeOpenAIEndpoint(base string) string {
+	return normalizeEndpointPath(base, "/v1/tokenize")
+}
+
+func normalizeEndpointPath(base, path string) string {
 	base = strings.TrimRight(base, "/")
 	if strings.HasSuffix(base, "/tokenize") || strings.HasSuffix(base, "/v1/tokenize") {
 		return base
 	}
-	return base + "/tokenize"
+	return base + path
 }
 
 // TokenizeChat sends the chat form. chatTemplateKwargs may be nil.
@@ -78,6 +89,20 @@ func (c *Client) TokenizeChat(ctx context.Context, endpoint, model string, messa
 		ChatTemplateKwargs:  chatTemplateKwargs,
 	}
 	return c.post(ctx, normalizeEndpoint(endpoint), body)
+}
+
+// TokenizeChatSGLang sends the chat form to SGLang's OpenAI-compatible
+// /v1/tokenize endpoint. SGLang also aliases /tokenize in recent builds, but
+// /v1/tokenize is the tested/documented chat-tokenize route.
+func (c *Client) TokenizeChatSGLang(ctx context.Context, endpoint, model string, messages []types.ChatMessage, tools []any, chatTemplateKwargs map[string]any) (*Result, error) {
+	body := chatRequest{
+		Model:               model,
+		Messages:            messages,
+		Tools:               tools,
+		AddGenerationPrompt: true,
+		ChatTemplateKwargs:  chatTemplateKwargs,
+	}
+	return c.post(ctx, normalizeOpenAIEndpoint(endpoint), body)
 }
 
 // TokenizeCompletion sends the prompt form.
@@ -103,7 +128,7 @@ func (c *Client) post(ctx context.Context, url string, body any) (*Result, error
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("tokenize endpoint status %d: %s", resp.StatusCode, truncate(string(data), 200))
+		return nil, tokenizeStatusError(resp.StatusCode, data, b)
 	}
 	var tr tokenizeResponse
 	if err := json.Unmarshal(data, &tr); err != nil {
@@ -115,6 +140,23 @@ func (c *Client) post(ctx context.Context, url string, body any) (*Result, error
 		cnt = len(tr.Tokens)
 	}
 	return &Result{Tokens: tr.Tokens, Count: cnt, MaxModelLen: tr.MaxModelLen}, nil
+}
+
+func tokenizeStatusError(status int, data, requestBody []byte) error {
+	msg := fmt.Sprintf("tokenize endpoint status %d: %s", status, truncate(string(data), 200))
+	if looksLikeLegacySGLangChatTokenize(data, requestBody) {
+		msg += " (SGLang rejected chat-form tokenize: this engine appears to require prompt-only /tokenize. Upgrade SGLang to v0.5.12+ or a build containing commit 27445f9836 / PR #23981 so /v1/tokenize accepts messages.)"
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+func looksLikeLegacySGLangChatTokenize(data, requestBody []byte) bool {
+	if !bytes.Contains(requestBody, []byte(`"messages"`)) {
+		return false
+	}
+	lower := bytes.ToLower(data)
+	return bytes.Contains(lower, []byte("prompt")) &&
+		(bytes.Contains(lower, []byte("field required")) || bytes.Contains(lower, []byte("missing")))
 }
 
 func truncate(s string, n int) string {

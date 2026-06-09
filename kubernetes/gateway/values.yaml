@@ -27,11 +27,11 @@ bootstrap:
   #           - model_id: "/mnt/nvme4n1/models/deepseek-ai/DeepSeek-V4-Pro"
   #             block_size: 256
   #             hash_seed: "0"
-  #             tokenizer_endpoint: http://sglang-deepseek-v4-pro.default.svc.cluster.local:30000
+  #             tokenizer_endpoint: http://sglang-deepseek-v4-pro.default.svc.cluster.local:30000/v1/tokenize
   #         engines:
   #           - engine_id: sglang-deepseek-v4-pro
   #             api_endpoint: http://sglang-deepseek-v4-pro.default.svc.cluster.local:30000
-  #             tokenizer_endpoint: http://sglang-deepseek-v4-pro.default.svc.cluster.local:30000
+  #             tokenizer_endpoint: http://sglang-deepseek-v4-pro.default.svc.cluster.local:30000/v1/tokenize
   #             kv_event_endpoint: tcp://sglang-deepseek-v4-pro.default.svc.cluster.local:5557
   #             replay_endpoint: tcp://sglang-deepseek-v4-pro.default.svc.cluster.local:5565
   #             topic: kv-events

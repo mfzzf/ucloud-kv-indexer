@@ -67,7 +67,7 @@ typo fails loudly instead of silently dropping config.
 | `block_size` | int (required) | **Must equal the engine's KV block size.** vLLM full_attention = 528 for qwen3.5-4b; SGLang = `--page-size` (64 here). Mismatch → request_keys never match. |
 | `hash_seed` | string | Namespace salt. Keep stable; `"0"` matches `PYTHONHASHSEED=0`. Only affects the namespace, not engine hashing. |
 | `hash_profile` | string | Defaults to `<framework>-v1-text`. Part of the namespace, so vLLM vs SGLang servings of the "same" model never cross-pollute. |
-| `tokenizer_endpoint` | string | Where to POST `/tokenize`. Falls back to an engine's `tokenizer_endpoint`. |
+| `tokenizer_endpoint` | string | Where to POST tokenization requests. Falls back to an engine's `tokenizer_endpoint`; SGLang should use `/v1/tokenize`. |
 
 The **namespace** a request maps to is `"<model_id>/v1/<hash_profile>/<block_size>"`
 (e.g. `qwen3.5-4b/v1/vllm-v1-text/528`). It is what `/index/stats` and `/query-prefix`
@@ -81,7 +81,7 @@ report.
 | `cluster_id` | string | Inherited if nested. |
 | `framework` | string | Inherited if nested. |
 | `api_endpoint` | string | Engine OpenAI API base (used to suggest a target + warm in tests). |
-| `tokenizer_endpoint` | string | Engine `/tokenize` base. |
+| `tokenizer_endpoint` | string | Engine tokenizer endpoint/base. SGLang should use `/v1/tokenize`; vLLM uses `/tokenize`. |
 | `kv_event_endpoint` | string | ZMQ PUB to **SUBSCRIBE** to, e.g. `tcp://127.0.0.1:5559`. The kvindexer *connects* here; the engine must *bind* it with `tcp://*:5559` (see README "Why engines publish on `tcp://*`"). |
 | `replay_endpoint` | string | ZMQ ROUTER for gap replay, e.g. `tcp://127.0.0.1:5560`. (Replay reconnect is a documented gap — see [scaling.md](scaling.md).) |
 | `topic` | string | KV-event topic, usually `kv-events`. |
