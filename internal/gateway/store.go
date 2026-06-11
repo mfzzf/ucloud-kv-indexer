@@ -1,132 +1,170 @@
 package gateway
 
 import (
-	"database/sql"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
+	"sort"
 	"sync"
+	"time"
 
-	_ "github.com/go-sql-driver/mysql" // MySQL driver for production gateway registry
-	_ "modernc.org/sqlite"             // pure-Go SQLite driver (no cgo)
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
+
+var ErrTokenizerAssetNotFound = errors.New("tokenizer asset not found")
 
 // Connection is one kvindexer the gateway federates: a cluster served by a
 // kvindexer at URL, reached with an optional bearer Token. Enabled rows are
 // included in the gateway's active backend set.
 //
-// This is the inverse of the old topology: the GATEWAY now owns the connection
-// registry (which kvindexers exist, where, and with what credential), while each
-// kvindexer loads only its own single-cluster bootstrap YAML. The
-// gateway↔kvindexer hop crosses the (public) network, so each connection carries
-// a bearer Token the gateway attaches to every forwarded request.
+// The gateway owns this registry. Each kvindexer loads only its own cluster
+// config; the gateway decides which kvindexers exist and which credential is
+// attached to the gateway-to-kvindexer hop.
 type Connection struct {
-	ID      string `json:"id"`
-	Cluster string `json:"cluster"`
-	URL     string `json:"url"`
-	Token   string `json:"token,omitempty"` // bearer token sent to this kvindexer
-	Enabled bool   `json:"enabled"`
+	ID      string `json:"id" bson:"_id"`
+	Cluster string `json:"cluster" bson:"cluster"`
+	URL     string `json:"url" bson:"url"`
+	Token   string `json:"token,omitempty" bson:"token,omitempty"`
+	Enabled bool   `json:"enabled" bson:"enabled"`
 }
 
-type connStoreDialect string
+// TokenizerAsset is the gateway-owned local tokenizer material for one
+// cluster/model pair. Zip bytes live in GridFS for MongoDB and in-memory only in
+// tests.
+type TokenizerAsset struct {
+	ID                 string        `json:"-" bson:"_id"`
+	Cluster            string        `json:"cluster" bson:"cluster"`
+	ModelID            string        `json:"model_id" bson:"model_id"`
+	ZipFileID          bson.ObjectID `json:"-" bson:"zip_file_id,omitempty"`
+	ZipSHA256          string        `json:"zip_sha256,omitempty" bson:"zip_sha256,omitempty"`
+	ChatTemplate       string        `json:"-" bson:"chat_template,omitempty"`
+	ChatTemplateSHA256 string        `json:"chat_template_sha256,omitempty" bson:"chat_template_sha256,omitempty"`
+	UpdatedAt          time.Time     `json:"updated_at" bson:"updated_at"`
 
-const (
-	dialectSQLite connStoreDialect = "sqlite"
-	dialectMySQL  connStoreDialect = "mysql"
-)
+	zipBytes []byte `bson:"-"`
+}
 
-// ConnStore is a SQL-backed registry of kvindexer connections. The database is
-// the cross-pod source of truth after first seed; read paths refresh the local
-// snapshot from the database so multiple gateway replicas converge without a
-// restart. Local dev uses SQLite; Kubernetes/production should use MySQL.
+// TokenizerAssetInput is an upsert payload for TokenizerAsset. Empty
+// TokenizerZip/ChatTemplate preserve existing values when the asset already
+// exists.
+type TokenizerAssetInput struct {
+	Cluster            string
+	ModelID            string
+	TokenizerZip       []byte
+	TokenizerZipName   string
+	ChatTemplate       string
+	ChatTemplateSHA256 string
+}
+
+// Store is the gateway's persistence boundary. Production uses MongoDB; tests
+// use the in-memory implementation below.
+type Store interface {
+	Close() error
+	Description() string
+	Count() int
+	SeedIfEmpty([]Connection) (bool, error)
+	List() []Connection
+	Backends() []Backend
+	Upsert(Connection) error
+	Delete(id string) error
+
+	PutTokenizerAsset(context.Context, TokenizerAssetInput) (TokenizerAsset, error)
+	GetTokenizerAsset(context.Context, string, string) (TokenizerAsset, error)
+	ReadTokenizerZip(context.Context, TokenizerAsset, io.Writer) error
+}
+
+// ConnStore is a MongoDB-backed gateway store. Connections are ordinary
+// documents; tokenizer zips are stored in a GridFS bucket so they do not bloat
+// the profile document.
 type ConnStore struct {
-	db      *sql.DB
-	dialect connStoreDialect
+	client *mongo.Client
+	db     *mongo.Database
+	bucket *mongo.GridFSBucket
+
+	timeout time.Duration
 	label   string
 
 	mu    sync.RWMutex
 	cache []Connection
 }
 
-// OpenConnStore opens (creating if needed) the SQLite database at path and loads
-// the connection cache. The caller should defer Close().
-func OpenConnStore(path string) (*ConnStore, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", path)
-	db, err := sql.Open("sqlite", dsn)
+// OpenMongoConnStore connects to MongoDB and initializes indexes.
+func OpenMongoConnStore(parent context.Context, uri, database string) (*ConnStore, error) {
+	if uri == "" {
+		return nil, fmt.Errorf("gateway mongo: uri required")
+	}
+	if database == "" {
+		return nil, fmt.Errorf("gateway mongo: database required")
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
 	if err != nil {
-		return nil, fmt.Errorf("gateway sqlite: open %s: %w", path, err)
+		return nil, fmt.Errorf("gateway mongo: connect: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	return openConnStore(db, dialectSQLite, path)
-}
+	if err := client.Ping(ctx, readpref.Primary()); err != nil {
+		_ = client.Disconnect(context.Background())
+		return nil, fmt.Errorf("gateway mongo: ping: %w", err)
+	}
 
-// OpenMySQLConnStore opens a MySQL-backed connection registry. dsn uses the
-// go-sql-driver/mysql form, for example:
-//
-//	kvgateway:secret@tcp(mysql:3306)/kvgateway?parseTime=true
-func OpenMySQLConnStore(dsn string) (*ConnStore, error) {
-	if dsn == "" {
-		return nil, fmt.Errorf("gateway mysql: dsn required")
+	db := client.Database(database)
+	s := &ConnStore{
+		client:  client,
+		db:      db,
+		bucket:  db.GridFSBucket(options.GridFSBucket().SetName("tokenizer_blobs")),
+		timeout: 5 * time.Second,
+		label:   database,
 	}
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("gateway mysql: open: %w", err)
-	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
-	return openConnStore(db, dialectMySQL, "mysql")
-}
-
-func openConnStore(db *sql.DB, dialect connStoreDialect, label string) (*ConnStore, error) {
-	s := &ConnStore{db: db, dialect: dialect, label: label}
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("gateway %s: ping: %w", dialect, err)
-	}
-	schema := sqliteSchema
-	if dialect == dialectMySQL {
-		schema = mysqlSchema
-	}
-	if _, err := db.Exec(schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("gateway %s: init schema: %w", dialect, err)
+	if err := s.initIndexes(parent); err != nil {
+		_ = client.Disconnect(context.Background())
+		return nil, err
 	}
 	if err := s.reload(); err != nil {
-		_ = db.Close()
+		_ = client.Disconnect(context.Background())
 		return nil, err
 	}
 	return s, nil
 }
 
-const sqliteSchema = `CREATE TABLE IF NOT EXISTS connections (
-    id      TEXT PRIMARY KEY,
-    cluster TEXT NOT NULL,
-    url     TEXT NOT NULL,
-    token   TEXT NOT NULL DEFAULT '',
-    enabled INTEGER NOT NULL DEFAULT 1
-);`
-
-const mysqlSchema = `CREATE TABLE IF NOT EXISTS connections (
-    id      VARCHAR(191) PRIMARY KEY,
-    cluster VARCHAR(191) NOT NULL,
-    url     TEXT NOT NULL,
-    token   TEXT NOT NULL,
-    enabled TINYINT(1) NOT NULL DEFAULT 1,
-    INDEX idx_connections_cluster (cluster)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`
-
-// Close closes the database.
-func (s *ConnStore) Close() error { return s.db.Close() }
-
-// Description returns a short storage label for logs.
-func (s *ConnStore) Description() string {
-	if s.label == "" {
-		return string(s.dialect)
+func (s *ConnStore) initIndexes(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, s.timeout)
+	defer cancel()
+	if _, err := s.db.Collection("connections").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "cluster", Value: 1}}},
+		{Keys: bson.D{{Key: "enabled", Value: 1}}},
+	}); err != nil {
+		return fmt.Errorf("gateway mongo: create connection indexes: %w", err)
 	}
-	return fmt.Sprintf("%s:%s", s.dialect, s.label)
+	if _, err := s.db.Collection("tokenizer_assets").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "cluster", Value: 1}, {Key: "model_id", Value: 1}}},
+	}); err != nil {
+		return fmt.Errorf("gateway mongo: create tokenizer asset indexes: %w", err)
+	}
+	return nil
 }
 
-// Count returns the number of stored connections (any enabled state).
+func (s *ConnStore) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	return s.client.Disconnect(ctx)
+}
+
+func (s *ConnStore) Description() string {
+	if s.label == "" {
+		return "mongo"
+	}
+	return "mongo:" + s.label
+}
+
 func (s *ConnStore) Count() int {
 	s.reloadBestEffort()
 	s.mu.RLock()
@@ -134,33 +172,19 @@ func (s *ConnStore) Count() int {
 	return len(s.cache)
 }
 
-// SeedIfEmpty inserts the given connections only when the store has no rows
-// (first boot). Returns true if it seeded. Thereafter the store is authoritative
-// and the admin API mutates it — matching the kvindexer's seed-once semantics.
+// SeedIfEmpty inserts connections only when the registry has no rows.
 func (s *ConnStore) SeedIfEmpty(conns []Connection) (bool, error) {
-	if s.Count() > 0 {
+	if s.Count() > 0 || len(conns) == 0 {
 		return false, nil
-	}
-	if len(conns) == 0 {
-		return false, nil
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return false, err
 	}
 	for _, c := range conns {
-		if err := s.execUpsert(tx, c); err != nil {
-			_ = tx.Rollback()
+		if err := s.upsertNoReload(c); err != nil {
 			return false, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
 	}
 	return true, s.reload()
 }
 
-// List returns a snapshot copy of all connections.
 func (s *ConnStore) List() []Connection {
 	s.reloadBestEffort()
 	s.mu.RLock()
@@ -170,8 +194,6 @@ func (s *ConnStore) List() []Connection {
 	return out
 }
 
-// Backends returns the enabled connections as gateway Backends (the active set
-// the gateway federates).
 func (s *ConnStore) Backends() []Backend {
 	s.reloadBestEffort()
 	s.mu.RLock()
@@ -185,37 +207,292 @@ func (s *ConnStore) Backends() []Backend {
 	return out
 }
 
-// Upsert inserts or updates a connection, then refreshes the cache.
 func (s *ConnStore) Upsert(c Connection) error {
-	if err := validateConnection(c); err != nil {
-		return err
-	}
-	if err := s.execUpsert(s.db, c); err != nil {
+	if err := s.upsertNoReload(c); err != nil {
 		return err
 	}
 	return s.reload()
 }
 
-type sqlExecutor interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}
-
-func (s *ConnStore) execUpsert(exec sqlExecutor, c Connection) error {
+func (s *ConnStore) upsertNoReload(c Connection) error {
 	if err := validateConnection(c); err != nil {
 		return err
 	}
-	query := `INSERT OR REPLACE INTO connections(id,cluster,url,token,enabled) VALUES(?,?,?,?,?)`
-	if s.dialect == dialectMySQL {
-		query = `INSERT INTO connections(id,cluster,url,token,enabled) VALUES(?,?,?,?,?)
-ON DUPLICATE KEY UPDATE cluster=VALUES(cluster), url=VALUES(url), token=VALUES(token), enabled=VALUES(enabled)`
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	_, err := s.db.Collection("connections").ReplaceOne(
+		ctx,
+		bson.M{"_id": c.ID},
+		c,
+		options.Replace().SetUpsert(true),
+	)
+	return err
+}
+
+func (s *ConnStore) Delete(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	if _, err := s.db.Collection("connections").DeleteOne(ctx, bson.M{"_id": id}); err != nil {
+		return err
 	}
-	_, err := exec.Exec(query, c.ID, c.Cluster, c.URL, c.Token, b2i(c.Enabled))
+	return s.reload()
+}
+
+func (s *ConnStore) reload() error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	cur, err := s.db.Collection("connections").Find(
+		ctx,
+		bson.M{},
+		options.Find().SetSort(bson.D{{Key: "cluster", Value: 1}, {Key: "_id", Value: 1}}),
+	)
+	if err != nil {
+		return fmt.Errorf("gateway mongo: list connections: %w", err)
+	}
+	defer cur.Close(ctx)
+	var cs []Connection
+	if err := cur.All(ctx, &cs); err != nil {
+		return fmt.Errorf("gateway mongo: decode connections: %w", err)
+	}
+	s.mu.Lock()
+	s.cache = cs
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *ConnStore) reloadBestEffort() {
+	if err := s.reload(); err != nil {
+		log.Printf("gateway mongo: refresh connection registry failed: %v", err)
+	}
+}
+
+func (s *ConnStore) PutTokenizerAsset(parent context.Context, in TokenizerAssetInput) (TokenizerAsset, error) {
+	if in.Cluster == "" || in.ModelID == "" {
+		return TokenizerAsset{}, fmt.Errorf("tokenizer asset requires cluster and model_id")
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+
+	existing, err := s.getTokenizerAsset(ctx, in.Cluster, in.ModelID)
+	if err != nil && !errors.Is(err, ErrTokenizerAssetNotFound) {
+		return TokenizerAsset{}, err
+	}
+
+	asset := existing
+	asset.ID = tokenizerAssetID(in.Cluster, in.ModelID)
+	asset.Cluster = in.Cluster
+	asset.ModelID = in.ModelID
+	if in.ChatTemplate != "" {
+		asset.ChatTemplate = in.ChatTemplate
+		asset.ChatTemplateSHA256 = sha256String(in.ChatTemplate)
+	}
+	if in.ChatTemplateSHA256 != "" {
+		asset.ChatTemplateSHA256 = in.ChatTemplateSHA256
+	}
+
+	var oldZip bson.ObjectID
+	if !existing.ZipFileID.IsZero() {
+		oldZip = existing.ZipFileID
+	}
+	if len(in.TokenizerZip) > 0 {
+		name := in.TokenizerZipName
+		if name == "" {
+			name = safeAssetFilename(in.ModelID) + ".zip"
+		}
+		fileID, err := s.bucket.UploadFromStream(ctx, name, bytes.NewReader(in.TokenizerZip))
+		if err != nil {
+			return TokenizerAsset{}, fmt.Errorf("gateway mongo: upload tokenizer zip: %w", err)
+		}
+		asset.ZipFileID = fileID
+		asset.ZipSHA256 = sha256Bytes(in.TokenizerZip)
+	}
+	asset.UpdatedAt = time.Now()
+
+	_, err = s.db.Collection("tokenizer_assets").ReplaceOne(
+		ctx,
+		bson.M{"_id": asset.ID},
+		asset,
+		options.Replace().SetUpsert(true),
+	)
+	if err != nil {
+		return TokenizerAsset{}, fmt.Errorf("gateway mongo: upsert tokenizer asset: %w", err)
+	}
+	if !oldZip.IsZero() && oldZip != asset.ZipFileID {
+		if err := s.bucket.Delete(ctx, oldZip); err != nil && !errors.Is(err, mongo.ErrFileNotFound) {
+			log.Printf("gateway mongo: delete old tokenizer zip %s: %v", oldZip.Hex(), err)
+		}
+	}
+	return asset, nil
+}
+
+func (s *ConnStore) GetTokenizerAsset(parent context.Context, cluster, modelID string) (TokenizerAsset, error) {
+	ctx, cancel := context.WithTimeout(parent, s.timeout)
+	defer cancel()
+	return s.getTokenizerAsset(ctx, cluster, modelID)
+}
+
+func (s *ConnStore) getTokenizerAsset(ctx context.Context, cluster, modelID string) (TokenizerAsset, error) {
+	var asset TokenizerAsset
+	err := s.db.Collection("tokenizer_assets").FindOne(ctx, bson.M{"_id": tokenizerAssetID(cluster, modelID)}).Decode(&asset)
+	if err == mongo.ErrNoDocuments {
+		return TokenizerAsset{}, ErrTokenizerAssetNotFound
+	}
+	if err != nil {
+		return TokenizerAsset{}, fmt.Errorf("gateway mongo: get tokenizer asset: %w", err)
+	}
+	return asset, nil
+}
+
+func (s *ConnStore) ReadTokenizerZip(parent context.Context, asset TokenizerAsset, w io.Writer) error {
+	if asset.ZipFileID.IsZero() {
+		return ErrTokenizerAssetNotFound
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	if _, err := s.bucket.DownloadToStream(ctx, asset.ZipFileID, w); err != nil {
+		return fmt.Errorf("gateway mongo: read tokenizer zip: %w", err)
+	}
+	return nil
+}
+
+// MemoryStore is intentionally small and is used by gateway unit tests. It
+// implements the same semantics as Mongo for connection CRUD and tokenizer
+// assets, without external services.
+type MemoryStore struct {
+	mu          sync.RWMutex
+	conns       map[string]Connection
+	assetByID   map[string]TokenizerAsset
+	description string
+}
+
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{
+		conns:       map[string]Connection{},
+		assetByID:   map[string]TokenizerAsset{},
+		description: "memory",
+	}
+}
+
+func (s *MemoryStore) Close() error { return nil }
+
+func (s *MemoryStore) Description() string { return s.description }
+
+func (s *MemoryStore) Count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.conns)
+}
+
+func (s *MemoryStore) SeedIfEmpty(conns []Connection) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.conns) > 0 || len(conns) == 0 {
+		return false, nil
+	}
+	for _, c := range conns {
+		if err := validateConnection(c); err != nil {
+			return false, err
+		}
+		s.conns[c.ID] = c
+	}
+	return true, nil
+}
+
+func (s *MemoryStore) List() []Connection {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Connection, 0, len(s.conns))
+	for _, c := range s.conns {
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Cluster != out[j].Cluster {
+			return out[i].Cluster < out[j].Cluster
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+func (s *MemoryStore) Backends() []Backend {
+	conns := s.List()
+	var out []Backend
+	for _, c := range conns {
+		if c.Enabled {
+			out = append(out, Backend{ID: c.ID, Cluster: c.Cluster, URL: c.URL, Token: c.Token})
+		}
+	}
+	return out
+}
+
+func (s *MemoryStore) Upsert(c Connection) error {
+	if err := validateConnection(c); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conns[c.ID] = c
+	return nil
+}
+
+func (s *MemoryStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.conns, id)
+	return nil
+}
+
+func (s *MemoryStore) PutTokenizerAsset(_ context.Context, in TokenizerAssetInput) (TokenizerAsset, error) {
+	if in.Cluster == "" || in.ModelID == "" {
+		return TokenizerAsset{}, fmt.Errorf("tokenizer asset requires cluster and model_id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := tokenizerAssetID(in.Cluster, in.ModelID)
+	asset := s.assetByID[id]
+	asset.ID = id
+	asset.Cluster = in.Cluster
+	asset.ModelID = in.ModelID
+	if in.ChatTemplate != "" {
+		asset.ChatTemplate = in.ChatTemplate
+		asset.ChatTemplateSHA256 = sha256String(in.ChatTemplate)
+	}
+	if in.ChatTemplateSHA256 != "" {
+		asset.ChatTemplateSHA256 = in.ChatTemplateSHA256
+	}
+	if len(in.TokenizerZip) > 0 {
+		asset.zipBytes = append(asset.zipBytes[:0], in.TokenizerZip...)
+		asset.ZipSHA256 = sha256Bytes(in.TokenizerZip)
+		asset.ZipFileID = bson.NewObjectID()
+	}
+	asset.UpdatedAt = time.Now()
+	s.assetByID[id] = asset
+	return asset, nil
+}
+
+func (s *MemoryStore) GetTokenizerAsset(_ context.Context, cluster, modelID string) (TokenizerAsset, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	asset, ok := s.assetByID[tokenizerAssetID(cluster, modelID)]
+	if !ok {
+		return TokenizerAsset{}, ErrTokenizerAssetNotFound
+	}
+	if len(asset.zipBytes) > 0 {
+		asset.zipBytes = append([]byte(nil), asset.zipBytes...)
+	}
+	return asset, nil
+}
+
+func (s *MemoryStore) ReadTokenizerZip(_ context.Context, asset TokenizerAsset, w io.Writer) error {
+	if len(asset.zipBytes) == 0 {
+		return ErrTokenizerAssetNotFound
+	}
+	_, err := w.Write(asset.zipBytes)
 	return err
 }
 
 // validateConnection checks required fields and that the URL is a usable
-// absolute http(s) URL — rejecting a scheme-less or malformed URL at
-// registration time rather than letting it fail opaquely as a 502 later.
+// absolute http(s) URL.
 func validateConnection(c Connection) error {
 	if c.ID == "" || c.Cluster == "" || c.URL == "" {
 		return fmt.Errorf("connection requires id, cluster, url")
@@ -227,49 +504,21 @@ func validateConnection(c Connection) error {
 	return nil
 }
 
-// Delete removes a connection by id, then refreshes the cache.
-func (s *ConnStore) Delete(id string) error {
-	if _, err := s.db.Exec("DELETE FROM connections WHERE id=?", id); err != nil {
-		return err
-	}
-	return s.reload()
+func tokenizerAssetID(cluster, modelID string) string {
+	sum := sha256.Sum256([]byte(cluster + "\x00" + modelID))
+	return hex.EncodeToString(sum[:])
 }
 
-// reload refreshes the in-memory cache from the database.
-func (s *ConnStore) reload() error {
-	rows, err := s.db.Query("SELECT id,cluster,url,token,enabled FROM connections ORDER BY cluster,id")
-	if err != nil {
-		return fmt.Errorf("gateway %s: list: %w", s.dialect, err)
-	}
-	defer rows.Close()
-	var cs []Connection
-	for rows.Next() {
-		var c Connection
-		var en int
-		if err := rows.Scan(&c.ID, &c.Cluster, &c.URL, &c.Token, &en); err != nil {
-			return err
-		}
-		c.Enabled = en != 0
-		cs = append(cs, c)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.cache = cs
-	s.mu.Unlock()
-	return nil
+func sha256Bytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
-func (s *ConnStore) reloadBestEffort() {
-	if err := s.reload(); err != nil {
-		log.Printf("gateway %s: refresh connection registry failed: %v", s.dialect, err)
-	}
+func sha256String(s string) string {
+	return sha256Bytes([]byte(s))
 }
 
-func b2i(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
+func safeAssetFilename(modelID string) string {
+	sum := sha256.Sum256([]byte(modelID))
+	return "tokenizer-" + hex.EncodeToString(sum[:8])
 }

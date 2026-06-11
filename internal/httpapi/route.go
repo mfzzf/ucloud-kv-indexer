@@ -169,7 +169,8 @@ func (s *Service) evaluate(ctx context.Context, rr *types.RouteRequest) RouteRes
 	ns := prof.Namespace()
 	resp.Config.Namespace = ns
 
-	// Tokenize via the engine endpoint (never locally). Pick an endpoint.
+	// Tokenize via the engine endpoint. Gateway-local tokenizer profiles are
+	// handled by kvgateway before requests reach this backend.
 	tokEndpoint := profileTokenizerEndpoint(prof, engines)
 	hashSupported := prof.SupportsMultimodal || !rr.HasMultimodalContent()
 

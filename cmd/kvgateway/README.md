@@ -17,7 +17,8 @@ and backend authentication centrally.
         kvgateway :8095
         ├── GET  fan-out + merge (cluster-tagged)  -> all selected backends
         ├── POST/PATCH write proxy (one backend)   -> cluster/backend-targeted
-        ├── GET/POST/DELETE /admin/connections     -> SQL registry
+        ├── GET/POST/DELETE /admin/connections     -> MongoDB registry
+        ├── local tokenizer assets                 -> MongoDB/GridFS + sidecar
         └── GET  /clusters-health                  -> live health probe
               │
       ┌───────┼─────────────────┐
@@ -32,8 +33,8 @@ and backend authentication centrally.
 | --- | --- | --- |
 | Fan-out GET | `/clusters` `/engines` `/model-profiles` `/policies` `/event-streams` `/index/stats` `/decisions` `/config/audit-log` | Query every selected backend, tag each array element with `_cluster` + `_backend`, merge. `/decisions` sorted by timestamp, `/config/audit-log` by version. A dead backend is logged and skipped, never blanks the response. |
 | Aggregate | `/config/versions` | Per-backend `{cluster, backend, config_version}` array. |
-| Write proxy | `POST/PATCH` on clusters, engines (`register`/`unregister`/`{id}`), `model-profiles`, `policies`; `DELETE /policies/{id}` | Proxied to **exactly one** backend. Selector must resolve to one - ambiguous -> `400`, no match -> `404`. Response carries `X-KVI-Backend` / `X-KVI-Cluster`. |
-| Admission / query proxy | `POST` `/route` `/v1/chat/completions` `/v1/responses` `/v1/messages` `/query-prefix` `/tokenize/preview` `/config/effective-policy/preview` | Proxied to one selected backend. |
+| Write proxy | `POST/PATCH` on clusters, engines (`register`/`unregister`/`{id}`), `model-profiles`, `policies`; `DELETE /policies/{id}` | Proxied to **exactly one** backend. Selector must resolve to one - ambiguous -> `400`, no match -> `404`. Local tokenizer profile uploads are stored by gateway before sanitized profile metadata is forwarded. |
+| Admission / query proxy | `POST` `/route` `/v1/chat/completions` `/v1/responses` `/v1/messages` `/query-prefix` `/tokenize/preview` `/config/effective-policy/preview` | Remote tokenizer profiles are proxied to one selected backend. Local tokenizer profiles are handled in gateway with token-count-only admission. |
 | Registry admin | `GET/POST /admin/connections`, `DELETE /admin/connections/{id}` | CRUD for the gateway-owned backend registry. Tokens are redacted in list responses. |
 | Gateway-native | `GET /clusters-health` `GET /healthz` | `/clusters-health` groups backends by cluster and live-probes each `/healthz`. |
 
@@ -49,21 +50,15 @@ Reads default to fan-out across all. Writes require an unambiguous target.
 ```bash
 go build -o /tmp/kvgateway ./cmd/kvgateway
 
-# Local dev: SQLite registry, seeded once from topology YAML.
+# Local dev / production: MongoDB registry and tokenizer asset store.
 /tmp/kvgateway \
   -addr :8095 \
-  -store sqlite \
-  -sqlite-path data/gateway-connections.db \
+  -store mongo \
+  -mongo-uri mongodb://127.0.0.1:27017 \
+  -mongo-db kvgateway \
   -configs deploy/local-vllm.yaml,deploy/local-sglang.yaml \
-  -backend-token dev-local-token
-
-# Kubernetes/production: MySQL registry shared by gateway replicas.
-/tmp/kvgateway \
-  -addr :8095 \
-  -store mysql \
-  -mysql-dsn 'kvgateway:secret@tcp(mysql:3306)/kvgateway?parseTime=true' \
-  -configs deploy/local-vllm.yaml,deploy/local-sglang.yaml \
-  -backend-token "$KVGATEWAY_BACKEND_TOKEN"
+  -backend-token dev-local-token \
+  -local-tokenizer-url http://127.0.0.1:9000
 ```
 
 Point the web console at the gateway:

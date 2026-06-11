@@ -63,6 +63,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "ucloud-kv-indexer.secretName" $root }}
                   key: backend-token
+{{- if .tokenizerDebug }}
+            - name: KVINDEXER_TOKENIZER_DEBUG
+              value: "1"
+{{- end }}
+{{- with .extraEnv }}
+{{ toYaml . | indent 12 }}
+{{- end }}
           readinessProbe:
             httpGet:
               path: /healthz

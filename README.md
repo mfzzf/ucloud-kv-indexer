@@ -79,9 +79,9 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
   `sqlite`, or `mongo`; local dev uses `-store mongo` so frontend policy edits survive
   restart.
 - **kvgateway** — the federation layer **and** the connection authority. It owns a
-  **SQL connection registry** (SQLite for local dev, MySQL for Kubernetes/production)
-  listing which kvindexers exist, their URLs, and their bearer tokens. It is seeded once
-  from one or more YAML files and editable live via
+  **MongoDB connection registry** plus local tokenizer assets, listing which kvindexers
+  exist, their URLs, and their bearer tokens. It is seeded once from one or more YAML
+  files and editable live via
   `/admin/connections`. It fans GET
   lists out to every cluster's kvindexer (tagging each row with `_cluster`/`_backend`),
   proxies writes/queries to one backend selected by `?cluster=`, and **attaches the bearer
@@ -89,8 +89,8 @@ miss; an unhealthy/absent stream forces fallback so we never 429 spuriously.
 - **web/** — a Next.js 16 console that talks *only* to the gateway and selects a cluster
   with `?cluster=`.
 
-> **Topology note.** State is centralized in the **gateway** (the connection registry),
-> while kvindexers sit next to the GPUs. This suits a deployment where
+> **Topology note.** Shared gateway state is centralized in MongoDB (connection
+> registry and local tokenizer assets), while kvindexers sit next to the GPUs. This suits a deployment where
 > the gateway is central and kvindexers sit remotely beside their clusters, reached over
 > the (firewalled) network with a shared bearer token.
 
@@ -276,12 +276,11 @@ Other store modes remain available:
   survive restart). Use for a standalone kvindexer with no gateway.
 - **file** — `-config data/config.json`, a single JSON snapshot.
 
-The **gateway** owns the connection registry in **SQLite** for local dev
-(`-store sqlite -sqlite-path ...`) or **MySQL** for shared deployments
-(`-store mysql -mysql-dsn ...`): the list of kvindexers
-(`{id, cluster, url, token, enabled}`), seeded once from YAML (`-config` or
-comma-separated `-configs`) with the shared `-backend-token`, then authoritative and
-editable live via
+The **gateway** owns the connection registry and local tokenizer assets in **MongoDB**
+(`-store mongo -mongo-uri ... -mongo-db ...`): the list of kvindexers
+(`{id, cluster, url, token, enabled}`), plus tokenizer zip/chat_template assets for
+local tokenizer profiles. It is seeded once from YAML (`-config` or comma-separated
+`-configs`) with the shared `-backend-token`, then authoritative and editable live via
 `/admin/connections` (`GET` / `POST` / `DELETE /admin/connections/{id}`).
 
 ---

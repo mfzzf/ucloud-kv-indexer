@@ -1,8 +1,7 @@
-// Package tokenizer is a thin HTTP client to the TARGET engine's tokenizer
-// endpoint (vLLM/SGLang /tokenize). It NEVER tokenizes locally and never
-// re-implements a chat template: it forwards messages/prompt/tools verbatim and
-// trusts only the returned token IDs and count. This keeps tokenization on the
-// engine side where the authoritative chat template lives.
+// Package tokenizer is a thin HTTP client to tokenizer endpoints: either the
+// target engine's vLLM/SGLang /tokenize API or the gateway-local Python
+// sidecar. It never re-implements a chat template in Go; it forwards
+// messages/prompt/tools verbatim and trusts only the returned token IDs/count.
 package tokenizer
 
 import (
@@ -11,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -20,12 +21,19 @@ import (
 
 // Client calls a vLLM/SGLang-compatible /tokenize endpoint.
 type Client struct {
-	HTTP *http.Client
+	HTTP          *http.Client
+	Debug         bool
+	FullErrorBody bool
 }
 
 // New returns a Client with a sane default timeout.
 func New() *Client {
-	return &Client{HTTP: &http.Client{Timeout: 10 * time.Second}}
+	debug := envBool("KVINDEXER_TOKENIZER_DEBUG")
+	return &Client{
+		HTTP:          &http.Client{Timeout: 10 * time.Second},
+		Debug:         debug,
+		FullErrorBody: debug || envBool("KVINDEXER_TOKENIZER_FULL_ERROR"),
+	}
 }
 
 // Result is the trusted output of tokenization.
@@ -111,6 +119,19 @@ func (c *Client) TokenizeCompletion(ctx context.Context, endpoint, model, prompt
 	return c.post(ctx, normalizeEndpoint(endpoint), body)
 }
 
+// TokenizeLocalChat sends chat-form input to the gateway-local Python
+// tokenizer sidecar. The sidecar exposes /tokenize, independent of serving
+// framework, so never use the SGLang /v1/tokenize variant here.
+func (c *Client) TokenizeLocalChat(ctx context.Context, endpoint, model string, messages []types.ChatMessage, tools []any) (*Result, error) {
+	body := chatRequest{
+		Model:               model,
+		Messages:            messages,
+		Tools:               tools,
+		AddGenerationPrompt: true,
+	}
+	return c.post(ctx, normalizeEndpoint(endpoint), body)
+}
+
 func (c *Client) post(ctx context.Context, url string, body any) (*Result, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -128,7 +149,10 @@ func (c *Client) post(ctx context.Context, url string, body any) (*Result, error
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode != http.StatusOK {
-		return nil, tokenizeStatusError(resp.StatusCode, data, b)
+		if c.Debug {
+			log.Printf("tokenize endpoint error url=%s status=%d request_body=%s response_body=%s", url, resp.StatusCode, string(b), string(data))
+		}
+		return nil, tokenizeStatusError(resp.StatusCode, data, b, c.FullErrorBody)
 	}
 	var tr tokenizeResponse
 	if err := json.Unmarshal(data, &tr); err != nil {
@@ -142,8 +166,12 @@ func (c *Client) post(ctx context.Context, url string, body any) (*Result, error
 	return &Result{Tokens: tr.Tokens, Count: cnt, MaxModelLen: tr.MaxModelLen}, nil
 }
 
-func tokenizeStatusError(status int, data, requestBody []byte) error {
-	msg := fmt.Sprintf("tokenize endpoint status %d: %s", status, truncate(string(data), 200))
+func tokenizeStatusError(status int, data, requestBody []byte, fullBody bool) error {
+	body := string(data)
+	if !fullBody {
+		body = truncate(body, 200)
+	}
+	msg := fmt.Sprintf("tokenize endpoint status %d: %s", status, body)
 	if looksLikeLegacySGLangChatTokenize(data, requestBody) {
 		msg += " (SGLang rejected chat-form tokenize: this engine appears to require prompt-only /tokenize. Upgrade SGLang to v0.5.12+ or a build containing commit 27445f9836 / PR #23981 so /v1/tokenize accepts messages.)"
 	}
@@ -164,4 +192,13 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func envBool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }

@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/ucloud/kv-indexer/internal/config"
 )
@@ -153,10 +156,45 @@ func (s *Service) handleListModelProfiles(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Service) handleCreateModelProfile(w http.ResponseWriter, r *http.Request) {
-	var p config.ModelProfile
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		s.handleCreateModelProfileMultipart(w, r)
+		return
+	}
+	var in struct {
+		config.ModelProfile
+		ChatTemplate string `json:"chat_template,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	p := in.ModelProfile
+	if p.ModelID == "" {
+		writeErr(w, http.StatusBadRequest, "model_id required")
+		return
+	}
+	stored := s.Store.UpsertModelProfile(p)
+	writeJSON(w, http.StatusOK, stored)
+}
+
+func (s *Service) handleCreateModelProfileMultipart(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(256 << 20); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	form := r.MultipartForm
+	p := config.ModelProfile{
+		ModelID:            formValue(form, "model_id"),
+		Framework:          config.Framework(formValue(form, "framework")),
+		TokenizerEndpoint:  formValue(form, "tokenizer_endpoint"),
+		TokenizerMode:      config.TokenizerMode(formValue(form, "tokenizer_mode")),
+		ChatTemplateSHA256: formValue(form, "chat_template_sha256"),
+		HashProfile:        formValue(form, "hash_profile"),
+		BlockSize:          formInt(form, "block_size"),
+		HashSeed:           formValue(form, "hash_seed"),
+		SupportsLoRA:       formBool(form, "supports_lora"),
+		SupportsMultimodal: formBool(form, "supports_multimodal"),
+		SupportsCacheSalt:  formBool(form, "supports_cache_salt"),
 	}
 	if p.ModelID == "" {
 		writeErr(w, http.StatusBadRequest, "model_id required")
@@ -164,6 +202,23 @@ func (s *Service) handleCreateModelProfile(w http.ResponseWriter, r *http.Reques
 	}
 	stored := s.Store.UpsertModelProfile(p)
 	writeJSON(w, http.StatusOK, stored)
+}
+
+func formValue(form *multipart.Form, key string) string {
+	if form == nil || len(form.Value[key]) == 0 {
+		return ""
+	}
+	return form.Value[key][0]
+}
+
+func formInt(form *multipart.Form, key string) int {
+	n, _ := strconv.Atoi(formValue(form, key))
+	return n
+}
+
+func formBool(form *multipart.Form, key string) bool {
+	v, _ := strconv.ParseBool(formValue(form, key))
+	return v
 }
 
 // ---- Policies ----

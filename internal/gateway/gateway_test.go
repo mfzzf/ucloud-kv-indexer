@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -182,10 +181,7 @@ func TestClustersHealth(t *testing.T) {
 }
 
 func TestAdminConnectionsCRUDPreservesOmittedFields(t *testing.T) {
-	store, err := OpenConnStore(filepath.Join(t.TempDir(), "gateway.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
+	store := NewMemoryStore()
 	defer store.Close()
 
 	h := NewWithStore(store, time.Now).Router()

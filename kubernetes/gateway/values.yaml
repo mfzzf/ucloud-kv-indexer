@@ -3,11 +3,25 @@ image:
   tag: latest
   pullPolicy: Always
 
+localTokenizer:
+  enabled: true
+  url: http://127.0.0.1:9000
+  port: 9000
+  tokenizersRoot: /data/tokenizers
+  image:
+    repository: uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-tokenizer-sidecar
+    tag: latest
+    pullPolicy: Always
+  resources: {}
+  persistence:
+    enabled: false
+    existingClaim: ""
+
 secrets:
   create: true
   name: kvgateway-secrets
   backendToken: 70982fdbbb8dc83145eda4b7fb99e55b0be74c0682c4f09c0b406112c10ae002
-  mysqlDSN: root:Ucloudkvindexer123!@tcp(10.2.238.191:3306)/kvgateway?parseTime=true
+  mongoURI: mongodb://root:BLR4X6MzK7WbvKn6@10.2.129.72:27017,10.2.43.102:27017,10.2.249.68:27017/?replicaSet=umongodb-rs-1rgl33565z5e
 
 bootstrap:
   enabled: false
@@ -45,7 +59,9 @@ gateway:
   replicas: 2
   listenAddress: ":8095"
   port: 8095
-  store: mysql
+  store: mongo
+  mongo:
+    db: kvgateway
   # configFiles:
   #   - th-gb200.yaml
   service:

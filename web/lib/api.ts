@@ -5,9 +5,13 @@ export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE || "/api/kvi";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers || {});
+  if (!(init?.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    headers,
     cache: "no-store",
   });
   const text = await res.text();
@@ -25,6 +29,8 @@ export const api = {
   get: <T>(p: string) => req<T>(p),
   post: <T>(p: string, body: unknown) =>
     req<T>(p, { method: "POST", body: JSON.stringify(body) }),
+  postForm: <T>(p: string, body: FormData) =>
+    req<T>(p, { method: "POST", body, headers: {} }),
   patch: <T>(p: string, body: unknown) =>
     req<T>(p, { method: "PATCH", body: JSON.stringify(body) }),
   del: <T>(p: string) => req<T>(p, { method: "DELETE" }),
@@ -102,6 +108,9 @@ export interface ModelProfile {
   framework: string;
   version: number;
   tokenizer_endpoint?: string;
+  tokenizer_mode?: "remote" | "local" | string;
+  chat_template_sha256?: string;
+  chat_template?: string;
   hash_profile: string;
   block_size: number;
   hash_seed: string;

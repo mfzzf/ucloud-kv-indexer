@@ -49,6 +49,8 @@ indexers:
     port: 8090
     store: mongo
     bootstrapFile: th-gb200.yaml
+    tokenizerDebug: false
+    extraEnv: []
     service:
       type: ClusterIP
     mongo:

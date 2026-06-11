@@ -1,7 +1,6 @@
 package gateway
 
 import (
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -12,10 +11,7 @@ import (
 )
 
 func TestGatewayOpenAPIMatchesRegisteredRoutes(t *testing.T) {
-	store, err := OpenConnStore(filepath.Join(t.TempDir(), "gateway.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
+	store := NewMemoryStore()
 	defer store.Close()
 
 	gw := NewWithStore(store, time.Now)

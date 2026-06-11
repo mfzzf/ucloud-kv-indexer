@@ -902,6 +902,14 @@
                     "description": "Prefix block size in tokens.",
                     "type": "integer"
                   },
+                  "chat_template": {
+                    "description": "Optional chat_template override when registering a local tokenizer.",
+                    "type": "string"
+                  },
+                  "chat_template_sha256": {
+                    "description": "SHA-256 of the active local chat_template.",
+                    "type": "string"
+                  },
                   "framework": {
                     "description": "Serving framework.",
                     "type": "string"
@@ -932,6 +940,10 @@
                   },
                   "tokenizer_endpoint": {
                     "description": "Optional tokenizer endpoint override.",
+                    "type": "string"
+                  },
+                  "tokenizer_mode": {
+                    "description": "Tokenizer source: remote (engine endpoint) or local (gateway sidecar).",
                     "type": "string"
                   },
                   "version": {

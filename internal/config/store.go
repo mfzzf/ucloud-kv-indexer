@@ -205,6 +205,8 @@ func (s *Store) EnginesForModel(model string) []Engine {
 func affectsHashNamespace(old, neu ModelProfile) bool {
 	return old.Framework != neu.Framework ||
 		old.TokenizerEndpoint != neu.TokenizerEndpoint ||
+		old.TokenizerMode != neu.TokenizerMode ||
+		old.ChatTemplateSHA256 != neu.ChatTemplateSHA256 ||
 		old.HashProfile != neu.HashProfile ||
 		old.BlockSize != neu.BlockSize ||
 		old.HashSeed != neu.HashSeed ||
@@ -213,12 +215,23 @@ func affectsHashNamespace(old, neu ModelProfile) bool {
 		old.SupportsCacheSalt != neu.SupportsCacheSalt
 }
 
+func normalizeModelProfile(p ModelProfile) ModelProfile {
+	if p.TokenizerMode == TokenizerModeLocal {
+		p.TokenizerEndpoint = ""
+		return p
+	}
+	p.TokenizerMode = TokenizerModeRemote
+	p.ChatTemplateSHA256 = ""
+	return p
+}
+
 // UpsertModelProfile stores a profile. If a profile already exists and a
 // token/hash-affecting field changed, Version is auto-bumped and the audit
 // entry is flagged. Returns the stored profile (with possibly bumped version).
 func (s *Store) UpsertModelProfile(p ModelProfile) ModelProfile {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	p = normalizeModelProfile(p)
 	bump := false
 	if old, ok := s.profiles[p.ModelID]; ok {
 		if affectsHashNamespace(*old, p) {
@@ -409,6 +422,7 @@ func (s *Store) applySnapshot(snap Snapshot) {
 		s.engines[e.EngineID] = e
 	}
 	for _, p := range snap.Profiles {
+		*p = normalizeModelProfile(*p)
 		s.profiles[p.ModelID] = p
 	}
 	for _, p := range snap.Policies {

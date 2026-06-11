@@ -7,8 +7,8 @@ This directory contains separate Helm charts:
 - `mongodb/` - deploys one regional MongoDB StatefulSet backed by local NVMe.
 - `web/` - deploys the Next.js console.
 
-MySQL is not deployed by these charts. The gateway connects to an external MySQL
-through `KVGATEWAY_MYSQL_DSN`, stored in the gateway Secret.
+The gateway stores its connection registry and local tokenizer assets in
+MongoDB through `KVGATEWAY_MONGO_URI`, stored in the gateway Secret.
 
 ## Layout
 
@@ -60,11 +60,13 @@ helm upgrade --install ucloud-kv-gateway ./kubernetes/gateway \
 
 Important values:
 
-- `secrets.mysqlDSN` - external MySQL DSN used by `kvgateway`.
+- `secrets.mongoURI` - MongoDB URI used by `kvgateway`.
 - `secrets.backendToken` - shared bearer token that gateway sends to every indexer.
-- `bootstrap.files` - topology files used only to seed gateway MySQL
+- `bootstrap.files` - topology files used only to seed gateway MongoDB
   `connections` from `clusters[].backends` when the table is empty.
 - `gateway.configFiles` - which bootstrap files the gateway reads.
+- `localTokenizer.*` - gateway-local tokenizer sidecar used for profiles whose
+  tokenizer source is `local`.
 
 The default indexer values include one `th-gb200` SGLang DeepSeek-V4-Pro
 example:
@@ -186,7 +188,7 @@ publicly exposed.
 The default `values.yaml` files include generated strong random strings for:
 
 - gateway -> indexer bearer token
-- example external MySQL DSN password
+- example gateway MongoDB URI password
 - example per-region MongoDB URI passwords
 
 Replace them before production if this repository is shared.
@@ -206,8 +208,8 @@ helm template ucloud-kv-web ./kubernetes/web
 
 ## Runtime notes
 
-- Gateway never listens to ZMQ. It only federates HTTP calls and owns the MySQL
-  connection registry.
+- Gateway never listens to ZMQ. It federates HTTP calls and owns the MongoDB
+  connection registry plus local tokenizer assets.
 - Each indexer should be deployed near its serving engines so ZMQ stays local to
   that region/cluster.
 - Gateway `clusters[].backends` should use a DNS/LB address reachable from the

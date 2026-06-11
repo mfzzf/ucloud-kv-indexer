@@ -13,8 +13,8 @@
 # Inference engines are managed SEPARATELY — `make inference` starts them,
 # `make down` NEVER stops them. Each kvindexer has its OWN bootstrap file and
 # persists dynamic config/policies plus decoded prefix-cache events in local
-# MongoDB. The GATEWAY owns only the connection registry (local SQLite here;
-# MySQL in Kubernetes/production) and sends a
+# MongoDB. The GATEWAY owns the connection registry and local tokenizer assets
+# in MongoDB, and sends a
 # bearer token to each kvindexer (which requires it).
 #
 # Quick start (from zero):
@@ -68,7 +68,6 @@ GATEWAY_OPENAPI := $(OPENAPI_DIR)/gateway.openapi.json
 CONFIG_VLLM        := $(ROOT)/deploy/local-vllm.yaml
 CONFIG_SGLANG      := $(ROOT)/deploy/local-sglang.yaml
 GATEWAY_CONFIGS    := $(CONFIG_VLLM),$(CONFIG_SGLANG)
-GW_SQLITE          := $(RUN)/gateway-connections.db
 
 # --- MongoDB (local Docker) ---
 DOCKER             := $(shell if docker ps >/dev/null 2>&1; then echo docker; elif sudo -n docker ps >/dev/null 2>&1; then echo "sudo -n docker"; else echo docker; fi)
@@ -76,13 +75,16 @@ MONGO_IMAGE        := mongo:8
 MONGO_CONTAINER    := ucloud-kv-indexer-mongo
 MONGO_VOLUME       := ucloud-kv-indexer-mongo
 MONGO_URI          := mongodb://127.0.0.1:27017
+MONGO_DB_GATEWAY   := kvgateway
 MONGO_DB_VLLM      := kvindexer_local_vllm
 MONGO_DB_SGLANG    := kvindexer_local_sglang
 
 # --- container image ---
 IMAGE              := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer:latest
 WEB_IMAGE          := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-indexer-web:latest
+SIDECAR_IMAGE      := uhub.service.ucloud.cn/uminfer-proxy/ucloud-kv-tokenizer-sidecar:latest
 IMAGE_PLATFORMS    := linux/amd64,linux/arm64
+BINFMT_IMAGE       := tonistiigi/binfmt:latest
 
 # Bearer token for the gateway↔kvindexer hop (crosses the network in prod). For
 # local dev a fixed dev token is fine; override with `make up AUTH_TOKEN=...`.
@@ -120,7 +122,7 @@ define stop-svc
 	rm -f $(RUN)/$(1).pid
 endef
 
-.PHONY: help build build-go build-web image image-local image-web images test \
+.PHONY: help build build-go build-web ensure-binfmt image image-control image-local image-web image-web-local image-sidecar image-sidecar-local images test \
         openapi openapi-check \
         up down restart status logs clean clean-mongo smoke \
         backend-vllm backend-sglang gateway frontend \
@@ -135,9 +137,12 @@ help:
 	@echo "  make inference   start Mooncake + vLLM + SGLang engines (separate lifecycle)"
 	@echo "  make inference-vllm start Mooncake + vLLM only"
 	@echo "  make build       compile Go binaries + web production build"
-	@echo "  make image       build+push multi-arch Docker image (override IMAGE=repo/name:tag IMAGE_PLATFORMS=linux/amd64,linux/arm64)"
-	@echo "  make image-local build local-arch Docker image only"
-	@echo "  make image-web   build frontend Docker image (override with WEB_IMAGE=repo/name:tag)"
+	@echo "  make image       build+push control-plane + tokenizer sidecar images"
+	@echo "  make image-control build+push control-plane image (override IMAGE=repo/name:tag IMAGE_PLATFORMS=linux/amd64,linux/arm64)"
+	@echo "  make image-sidecar build+push tokenizer sidecar image (override SIDECAR_IMAGE=repo/name:tag)"
+	@echo "  make image-web   build+push frontend image (override WEB_IMAGE=repo/name:tag)"
+	@echo "  make ensure-binfmt install arm64 binfmt/QEMU if multi-arch buildx cannot run it"
+	@echo "  make image-local build local-arch control-plane image only"
 	@echo "  make up          start MongoDB + gateway + both kvindexer backends + frontend"
 	@echo "  make down        stop the control plane (inference untouched)"
 	@echo "  make restart     down then up"
@@ -169,7 +174,18 @@ build-web:
 	} > .env.local.tmp && mv .env.local.tmp .env.local
 	cd $(ROOT)/web && PATH="$(NODE_BIN):$$PATH" $(NPM) run build
 
-image:
+ensure-binfmt:
+	@if echo "$(IMAGE_PLATFORMS)" | grep -q 'linux/arm64' && ! $(DOCKER) buildx ls 2>/dev/null | grep -q 'linux/arm64'; then \
+		echo "==> installing arm64 binfmt/QEMU via $(BINFMT_IMAGE)"; \
+		$(DOCKER) run --privileged --rm $(BINFMT_IMAGE) --install arm64; \
+		$(DOCKER) buildx inspect --bootstrap >/dev/null; \
+	else \
+		echo "==> arm64 binfmt/QEMU already available or not requested"; \
+	fi
+
+image: image-control image-sidecar
+
+image-control: ensure-binfmt
 	@echo "==> building and pushing Docker image $(IMAGE) for $(IMAGE_PLATFORMS)"
 	cd $(ROOT) && $(DOCKER) buildx build --platform $(IMAGE_PLATFORMS) --provenance=false -t $(IMAGE) --push .
 
@@ -177,9 +193,21 @@ image-local:
 	@echo "==> building local-arch Docker image $(IMAGE)"
 	cd $(ROOT) && $(DOCKER) build -t $(IMAGE) .
 
-image-web:
-	@echo "==> building frontend Docker image $(WEB_IMAGE)"
+image-web: ensure-binfmt
+	@echo "==> building and pushing frontend Docker image $(WEB_IMAGE) for $(IMAGE_PLATFORMS)"
+	cd $(ROOT) && $(DOCKER) buildx build --platform $(IMAGE_PLATFORMS) --provenance=false -f web/Dockerfile -t $(WEB_IMAGE) --push web
+
+image-web-local:
+	@echo "==> building local-arch frontend Docker image $(WEB_IMAGE)"
 	cd $(ROOT) && $(DOCKER) build -f web/Dockerfile -t $(WEB_IMAGE) web
+
+image-sidecar: ensure-binfmt
+	@echo "==> building and pushing tokenizer sidecar Docker image $(SIDECAR_IMAGE) for $(IMAGE_PLATFORMS)"
+	cd $(ROOT) && $(DOCKER) buildx build --platform $(IMAGE_PLATFORMS) --provenance=false -f sidecars/tokenizer/Dockerfile -t $(SIDECAR_IMAGE) --push sidecars/tokenizer
+
+image-sidecar-local:
+	@echo "==> building local-arch tokenizer sidecar Docker image $(SIDECAR_IMAGE)"
+	cd $(ROOT) && $(DOCKER) build -f sidecars/tokenizer/Dockerfile -t $(SIDECAR_IMAGE) sidecars/tokenizer
 
 images: image image-web
 
@@ -263,10 +291,11 @@ backend-vllm: $(KVINDEXER) | $(RUN)
 backend-sglang: $(KVINDEXER) | $(RUN)
 	$(call start-svc,backend-sglang,$(PORT_SGLANG_KVI),$(RUN)/backend-sglang.log,$(KVINDEXER) -addr $(BIND):$(PORT_SGLANG_KVI) -store mongo -mongo-uri $(MONGO_URI) -mongo-db $(MONGO_DB_SGLANG) -bootstrap $(CONFIG_SGLANG) -cluster $(CLUSTER_SGLANG) -auth-token $(AUTH_TOKEN))
 
-# The gateway OWNS the connection registry (SQLite), seeded once from config with
-# the shared bearer token; it attaches that token to every call to a kvindexer.
+# The gateway OWNS the connection registry and tokenizer assets in MongoDB,
+# seeded once from config with the shared bearer token; it attaches that token
+# to every call to a kvindexer.
 gateway: $(KVGATEWAY)
-	$(call start-svc,gateway,$(PORT_GW),$(RUN)/gateway.log,$(KVGATEWAY) -addr $(BIND):$(PORT_GW) -sqlite-path $(GW_SQLITE) -configs $(GATEWAY_CONFIGS) -backend-token $(AUTH_TOKEN))
+	$(call start-svc,gateway,$(PORT_GW),$(RUN)/gateway.log,$(KVGATEWAY) -addr $(BIND):$(PORT_GW) -store mongo -mongo-uri $(MONGO_URI) -mongo-db $(MONGO_DB_GATEWAY) -configs $(GATEWAY_CONFIGS) -backend-token $(AUTH_TOKEN) -local-tokenizer-url http://127.0.0.1:9000)
 
 frontend:
 	@[ -d $(ROOT)/web/.next ] || $(MAKE) build-web

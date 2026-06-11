@@ -84,12 +84,14 @@ type BootstrapEngine struct {
 }
 
 type BootstrapProfile struct {
-	ModelID           string `yaml:"model_id"`
-	Framework         string `yaml:"framework"`
-	HashProfile       string `yaml:"hash_profile"`
-	BlockSize         int    `yaml:"block_size"`
-	HashSeed          string `yaml:"hash_seed"`
-	TokenizerEndpoint string `yaml:"tokenizer_endpoint"`
+	ModelID            string `yaml:"model_id"`
+	Framework          string `yaml:"framework"`
+	HashProfile        string `yaml:"hash_profile"`
+	BlockSize          int    `yaml:"block_size"`
+	HashSeed           string `yaml:"hash_seed"`
+	TokenizerEndpoint  string `yaml:"tokenizer_endpoint"`
+	TokenizerMode      string `yaml:"tokenizer_mode"`
+	ChatTemplateSHA256 string `yaml:"chat_template_sha256"`
 }
 
 type BootstrapPolicy struct {
@@ -241,12 +243,14 @@ func (s *Store) ApplyBootstrapForCluster(bs *Bootstrap, clusterID string) bool {
 			continue
 		}
 		s.UpsertModelProfile(ModelProfile{
-			ModelID:           p.ModelID,
-			Framework:         Framework(p.Framework),
-			HashProfile:       p.HashProfile,
-			BlockSize:         p.BlockSize,
-			HashSeed:          p.HashSeed,
-			TokenizerEndpoint: p.TokenizerEndpoint,
+			ModelID:            p.ModelID,
+			Framework:          Framework(p.Framework),
+			HashProfile:        p.HashProfile,
+			BlockSize:          p.BlockSize,
+			HashSeed:           p.HashSeed,
+			TokenizerEndpoint:  p.TokenizerEndpoint,
+			TokenizerMode:      TokenizerMode(p.TokenizerMode),
+			ChatTemplateSHA256: p.ChatTemplateSHA256,
 		})
 	}
 

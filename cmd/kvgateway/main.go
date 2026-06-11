@@ -3,7 +3,7 @@
 // console talks to this single endpoint and selects a cluster with ?cluster=;
 // the gateway fans out reads and proxies writes/admission to the right backend.
 //
-// The gateway OWNS the connection registry (-store sqlite|mysql): the list of
+// The gateway OWNS the connection registry (-store mongo): the list of
 // kvindexers it federates ({id, cluster, url, token, enabled}). On first boot an
 // empty registry is SEEDED from -config/-configs topology YAML — one connection
 // per clusters[].backends URL, id
@@ -28,21 +28,28 @@ import (
 
 func main() {
 	var (
-		addr         = flag.String("addr", ":8095", "HTTP listen address")
-		storeBackend = flag.String("store", "sqlite", "connection registry backend: sqlite | mysql")
-		sqlitePath   = flag.String("sqlite-path", "data/gateway.db", "SQLite connection registry path: the gateway manages kvindexer connections here and serves /admin/connections CRUD")
-		mysqlDSN     = flag.String("mysql-dsn", "", "MySQL DSN for the gateway connection registry (store=mysql; env KVGATEWAY_MYSQL_DSN)")
-		configPath   = flag.String("config", "", "topology YAML; on first boot its clusters[].backends SEED the (empty) connection registry")
-		configPaths  = flag.String("configs", "", "comma-separated topology config YAML files; merged for first-boot connection seeding")
-		backendToken = flag.String("backend-token", "", "bearer token the gateway sends to every kvindexer (env KVGATEWAY_BACKEND_TOKEN); applied to seeded connections")
+		addr              = flag.String("addr", ":8095", "HTTP listen address")
+		storeBackend      = flag.String("store", "mongo", "connection registry backend: mongo")
+		mongoURI          = flag.String("mongo-uri", "mongodb://127.0.0.1:27017", "MongoDB URI for gateway registry/tokenizer assets (env KVGATEWAY_MONGO_URI)")
+		mongoDB           = flag.String("mongo-db", "kvgateway", "MongoDB database for gateway registry/tokenizer assets (env KVGATEWAY_MONGO_DB)")
+		localTokenizerURL = flag.String("local-tokenizer-url", "", "gateway-local tokenizer sidecar URL (env KVGATEWAY_LOCAL_TOKENIZER_URL)")
+		configPath        = flag.String("config", "", "topology YAML; on first boot its clusters[].backends SEED the (empty) connection registry")
+		configPaths       = flag.String("configs", "", "comma-separated topology config YAML files; merged for first-boot connection seeding")
+		backendToken      = flag.String("backend-token", "", "bearer token the gateway sends to every kvindexer (env KVGATEWAY_BACKEND_TOKEN); applied to seeded connections")
 	)
 	flag.Parse()
 
 	if v := os.Getenv("KVGATEWAY_STORE"); v != "" {
 		*storeBackend = v
 	}
-	if v := os.Getenv("KVGATEWAY_MYSQL_DSN"); v != "" {
-		*mysqlDSN = v
+	if v := os.Getenv("KVGATEWAY_MONGO_URI"); v != "" {
+		*mongoURI = v
+	}
+	if v := os.Getenv("KVGATEWAY_MONGO_DB"); v != "" {
+		*mongoDB = v
+	}
+	if v := os.Getenv("KVGATEWAY_LOCAL_TOKENIZER_URL"); v != "" {
+		*localTokenizerURL = v
 	}
 	if *backendToken == "" {
 		*backendToken = os.Getenv("KVGATEWAY_BACKEND_TOKEN")
@@ -51,7 +58,7 @@ func main() {
 	// The gateway OWNS the connection registry (inverse topology). Seed once from
 	// -config/-configs when the DB is empty, then
 	// the DB + /admin/connections are authoritative.
-	store, err := openConnectionStore(*storeBackend, *sqlitePath, *mysqlDSN)
+	store, err := openConnectionStore(context.Background(), *storeBackend, *mongoURI, *mongoDB)
 	if err != nil {
 		log.Fatalf("connection store: %v", err)
 	}
@@ -76,17 +83,17 @@ func main() {
 	if len(active) == 0 {
 		log.Printf("warning: gateway has 0 enabled connections (registry rows=%d); it will federate nothing until you add connections via /admin/connections or seed with -config", store.Count())
 	}
-	runServer(*addr, gateway.NewWithStore(store, time.Now), len(active))
+	gw := gateway.NewWithStore(store, time.Now)
+	gw.SetLocalTokenizerURL(*localTokenizerURL)
+	runServer(*addr, gw, len(active))
 }
 
-func openConnectionStore(storeBackend, sqlitePath, mysqlDSN string) (*gateway.ConnStore, error) {
+func openConnectionStore(ctx context.Context, storeBackend, mongoURI, mongoDB string) (*gateway.ConnStore, error) {
 	switch storeBackend {
-	case "sqlite":
-		return gateway.OpenConnStore(sqlitePath)
-	case "mysql":
-		return gateway.OpenMySQLConnStore(mysqlDSN)
+	case "mongo":
+		return gateway.OpenMongoConnStore(ctx, mongoURI, mongoDB)
 	default:
-		log.Fatalf("unknown -store %q (want sqlite|mysql)", storeBackend)
+		log.Fatalf("unknown -store %q (want mongo)", storeBackend)
 		return nil, nil
 	}
 }

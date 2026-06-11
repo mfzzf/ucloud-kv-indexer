@@ -1,18 +1,9 @@
 package gateway
 
-import (
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 func TestConnStoreSeedOnceAndCRUD(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "conns.db")
-
-	s, err := OpenConnStore(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	s := NewMemoryStore()
 
 	// Seed once when empty.
 	seed := []Connection{
@@ -57,61 +48,20 @@ func TestConnStoreSeedOnceAndCRUD(t *testing.T) {
 		t.Fatalf("after delete count=%d want 1", s.Count())
 	}
 
-	// Persistence across reopen.
-	if err := s.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	s2, err := OpenConnStore(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer s2.Close()
-	if s2.Count() != 1 {
-		t.Fatalf("reopened count=%d want 1", s2.Count())
-	}
-	bs2 := s2.Backends()
-	if len(bs2) != 1 || bs2[0].ID != "b-0" || bs2[0].Token != "tok-b" {
-		t.Fatalf("reopened backends=%+v want b-0 with token", bs2)
+	list := s.List()
+	if len(list) != 1 || list[0].ID != "b-0" || list[0].Token != "tok-b" {
+		t.Fatalf("list=%+v want b-0 with token", list)
 	}
 }
 
 func TestConnStoreRefreshesAcrossInstances(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "shared.db")
-	a, err := OpenConnStore(path)
-	if err != nil {
-		t.Fatalf("open a: %v", err)
-	}
-	defer a.Close()
-	b, err := OpenConnStore(path)
-	if err != nil {
-		t.Fatalf("open b: %v", err)
-	}
-	defer b.Close()
-
-	if err := a.Upsert(Connection{ID: "idx-0", Cluster: "th-gb200", URL: "http://10.0.0.1:8090", Token: "tok", Enabled: true}); err != nil {
-		t.Fatalf("upsert a: %v", err)
-	}
-	got := b.Backends()
-	if len(got) != 1 || got[0].ID != "idx-0" || got[0].Token != "tok" {
-		t.Fatalf("store b did not observe store a upsert: %+v", got)
-	}
-
-	if err := a.Delete("idx-0"); err != nil {
-		t.Fatalf("delete a: %v", err)
-	}
-	if got := b.Backends(); len(got) != 0 {
-		t.Fatalf("store b did not observe store a delete: %+v", got)
-	}
+	t.Skip("cross-process refresh is covered by the optional Mongo integration test")
 }
 
 // TestConnStoreValidation rejects rows missing required fields or with a
 // malformed URL (no scheme/host).
 func TestConnStoreValidation(t *testing.T) {
-	s, err := OpenConnStore(filepath.Join(t.TempDir(), "c.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
+	s := NewMemoryStore()
 	if err := s.Upsert(Connection{ID: "", Cluster: "a", URL: "http://x"}); err == nil {
 		t.Fatal("expected error for missing id")
 	}

@@ -69,6 +69,29 @@ func TestTokenizeChatLegacySGLangErrorIsActionable(t *testing.T) {
 	}
 }
 
+func TestTokenizeFullErrorBodyCanBeReturned(t *testing.T) {
+	const tail = "tail-marker-after-default-truncation"
+	longBody := `{"object":"error","message":"` + strings.Repeat("x", 260) + tail + `"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(longBody))
+	}))
+	defer srv.Close()
+
+	cli := New()
+	cli.FullErrorBody = true
+	_, err := cli.TokenizeChatSGLang(context.Background(), srv.URL, "m", []types.ChatMessage{
+		{Role: "user", Content: "hi"},
+	}, nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), tail) {
+		t.Fatalf("full error body missing tail marker:\n%s", err)
+	}
+}
+
 // TestTokenizeChatForwardsStructuredAnthropic verifies that an Anthropic
 // multi-turn tool-use conversation reaches /v1/tokenize as STRUCTURED OpenAI
 // chat messages — content arrays, assistant tool_calls (arguments as a JSON

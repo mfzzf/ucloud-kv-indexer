@@ -44,7 +44,6 @@ func main() {
 	if v := os.Getenv("KVINDEXER_MONGO_DB"); v != "" {
 		*mongoDB = v
 	}
-
 	persister, eventSink, closer := buildPersister(*store, *snapPath, *sqlitePath, *mongoURI, *mongoDB)
 	if closer != nil {
 		defer closer()

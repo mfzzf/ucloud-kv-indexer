@@ -57,6 +57,14 @@ export default function SimulatorPage() {
     () => [...new Set((profiles.data ?? []).map((p) => p.model_id))].sort(),
     [profiles.data],
   );
+  const selectedProfile = React.useMemo(
+    () => (profiles.data ?? []).find((p) => p.model_id === model),
+    [profiles.data, model],
+  );
+  const isLocalModel = React.useMemo(
+    () => selectedProfile?.tokenizer_mode === "local",
+    [selectedProfile],
+  );
   const [proto, setProto] = React.useState("openai.chat");
   const [text, setText] = React.useState(
     "In a distant kingdom, the council debated trade routes. ".repeat(20),
@@ -132,8 +140,13 @@ export default function SimulatorPage() {
 
   async function runAll() {
     setErr("");
+    if (needsCluster) {
+      setErr(t("sim.needs_cluster"));
+      return;
+    }
     const tk = await tokenize.mutateAsync().catch(() => null);
-    if (tk) await query.mutateAsync(tk.tokens).catch(() => null);
+    if (tk && !isLocalModel) await query.mutateAsync(tk.tokens).catch(() => null);
+    if (isLocalModel) setHits(null);
     await judge.mutateAsync().catch(() => null);
   }
 

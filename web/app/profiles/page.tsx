@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, AlertTriangle } from "lucide-react";
+import { Plus, AlertTriangle, Upload } from "lucide-react";
 import { api, ModelProfile } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -110,13 +111,14 @@ export default function ProfilesPage() {
             onRetry={() => profiles.refetch()}
           >
             <Table>
-            <TableHeader>
+              <TableHeader>
               <TableRow>
                 <TableHead className="pl-6">
                   {t("profiles.col.model")}
                 </TableHead>
                 {multiCluster && <TableHead>{t("cluster.col")}</TableHead>}
                 <TableHead>{t("profiles.col.framework")}</TableHead>
+                <TableHead>{t("profiles.col.tokenizer_source")}</TableHead>
                 <TableHead>{t("profiles.col.version")}</TableHead>
                 <TableHead>{t("profiles.col.hash")}</TableHead>
                 <TableHead>{t("profiles.col.block")}</TableHead>
@@ -124,8 +126,8 @@ export default function ProfilesPage() {
                 <TableHead>{t("profiles.col.features")}</TableHead>
                 <TableHead className="pr-6 text-right" />
               </TableRow>
-            </TableHeader>
-            <TableBody>
+              </TableHeader>
+              <TableBody>
               {(profiles.data ?? []).map((p) => (
                 <TableRow key={`${p._backend ?? ""}/${p.model_id}`}>
                   <TableCell className="pl-6 font-mono text-xs">
@@ -138,6 +140,17 @@ export default function ProfilesPage() {
                   )}
                   <TableCell>
                     <Badge variant="secondary">{p.framework}</Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={
+                        p.tokenizer_mode === "local" ? "warning" : "outline"
+                      }
+                    >
+                      {p.tokenizer_mode === "local"
+                        ? t("profiles.tokenizer_mode.local")
+                        : t("profiles.tokenizer_mode.remote")}
+                    </Badge>
                   </TableCell>
                   <TableCell>
                     <Badge variant="success">v{p.version}</Badge>
@@ -191,8 +204,8 @@ export default function ProfilesPage() {
                   </TableCell>
                 </TableRow>
               ))}
-            </TableBody>
-          </Table>
+              </TableBody>
+            </Table>
           {(profiles.data ?? []).length === 0 && (
             <EmptyState>{t("profiles.empty")}</EmptyState>
           )}
@@ -208,6 +221,7 @@ function blank(): ModelProfile {
     model_id: "",
     framework: "vllm",
     version: 0,
+    tokenizer_mode: "remote",
     hash_profile: "vllm-v1-text",
     block_size: 16,
     hash_seed: "0",
@@ -232,16 +246,28 @@ function ProfileForm({
 }) {
   const t = useT();
   const [f, setF] = React.useState<ModelProfile>(initial);
+  const [tokenizerZip, setTokenizerZip] = React.useState<File | null>(null);
+  const [chatTemplateFile, setChatTemplateFile] = React.useState<File | null>(null);
   const [err, setErr] = React.useState("");
   const save = useMutation({
     // Editing routes to the row's own backend; creating uses the selected cluster.
-    mutationFn: () =>
-      api.post<ModelProfile>(
-        initial._backend
-          ? backendQ("/model-profiles", initial._backend)
-          : clusterQ("/model-profiles", cluster),
-        f,
-      ),
+    mutationFn: () => {
+      const target = initial._backend
+        ? backendQ("/model-profiles", initial._backend)
+        : clusterQ("/model-profiles", cluster);
+      const payload = profileForSave(f);
+      const hasLocalUpload =
+        f.tokenizer_mode === "local" &&
+        (tokenizerZip || chatTemplateFile || Boolean(f.chat_template));
+      if (!hasLocalUpload) {
+        return api.post<ModelProfile>(target, payload);
+      }
+      const body = new FormData();
+      appendProfileForm(body, payload);
+      if (tokenizerZip) body.set("tokenizer_zip", tokenizerZip);
+      if (chatTemplateFile) body.set("chat_template_file", chatTemplateFile);
+      return api.postForm<ModelProfile>(target, body);
+    },
     onSuccess: onDone,
     onError: (e: Error) => setErr(e.message),
   });
@@ -251,6 +277,8 @@ function ProfileForm({
     (existing.block_size !== f.block_size ||
       existing.hash_profile !== f.hash_profile ||
       existing.tokenizer_endpoint !== f.tokenizer_endpoint ||
+      existing.tokenizer_mode !== f.tokenizer_mode ||
+      existing.chat_template_sha256 !== f.chat_template_sha256 ||
       existing.hash_seed !== f.hash_seed ||
       existing.framework !== f.framework ||
       existing.supports_lora !== f.supports_lora ||
@@ -307,13 +335,64 @@ function ProfileForm({
           </p>
         </div>
         <div className="space-y-2">
-          <Label>{t("profiles.field.tokenizer")}</Label>
-          <Input
-            value={f.tokenizer_endpoint ?? ""}
-            placeholder={t("profiles.field.tokenizer_ph")}
-            onChange={(e) => setS("tokenizer_endpoint")(e.target.value)}
-          />
+          <Label>{t("profiles.field.tokenizer_mode")}</Label>
+          <Select
+            value={f.tokenizer_mode || "remote"}
+            onValueChange={setS("tokenizer_mode")}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="remote">
+                {t("profiles.tokenizer_mode.remote")}
+              </SelectItem>
+              <SelectItem value="local">
+                {t("profiles.tokenizer_mode.local")}
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </div>
+        {f.tokenizer_mode !== "local" && (
+          <div className="space-y-2">
+            <Label>{t("profiles.field.tokenizer")}</Label>
+            <Input
+              value={f.tokenizer_endpoint ?? ""}
+              placeholder={t("profiles.field.tokenizer_ph")}
+              onChange={(e) => setS("tokenizer_endpoint")(e.target.value)}
+            />
+          </div>
+        )}
+        {f.tokenizer_mode === "local" && (
+          <>
+            <div className="space-y-2">
+              <Label>{t("profiles.field.tokenizer_zip")}</Label>
+              <Input
+                type="file"
+                accept=".zip,application/zip"
+                onChange={(e) => setTokenizerZip(e.target.files?.[0] ?? null)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>{t("profiles.field.template_file")}</Label>
+              <Input
+                type="file"
+                accept=".jinja,.jinja2,.txt,.json"
+                onChange={(e) =>
+                  setChatTemplateFile(e.target.files?.[0] ?? null)
+                }
+              />
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <Label>{t("profiles.field.template")}</Label>
+              <Textarea
+                value={f.chat_template ?? ""}
+                onChange={(e) => setS("chat_template")(e.target.value)}
+                className="border-input bg-background min-h-28 w-full rounded-md border px-3 py-2 font-mono text-xs shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+              />
+            </div>
+          </>
+        )}
         <div className="space-y-2">
           <Label>{t("profiles.field.seed")}</Label>
           <Input
@@ -359,12 +438,49 @@ function ProfileForm({
             {t("common.cancel")}
           </Button>
           <Button onClick={() => save.mutate()} disabled={!f.model_id}>
+            {f.tokenizer_mode === "local" && (tokenizerZip || chatTemplateFile) && (
+              <Upload />
+            )}
             {willBump ? t("profiles.btn.save_new") : t("common.save")}
           </Button>
         </div>
       </SheetFooter>
     </div>
   );
+}
+
+function appendProfileForm(body: FormData, f: ModelProfile) {
+  const put = (k: keyof ModelProfile, v: unknown) => {
+    if (v === undefined || v === null) return;
+    body.set(k, String(v));
+  };
+  put("model_id", f.model_id);
+  put("framework", f.framework);
+  put("tokenizer_endpoint", f.tokenizer_endpoint ?? "");
+  put("tokenizer_mode", f.tokenizer_mode ?? "remote");
+  put("chat_template", f.chat_template ?? "");
+  put("hash_profile", f.hash_profile);
+  put("block_size", f.block_size);
+  put("hash_seed", f.hash_seed);
+  put("supports_lora", f.supports_lora);
+  put("supports_multimodal", f.supports_multimodal);
+  put("supports_cache_salt", f.supports_cache_salt);
+}
+
+function profileForSave(f: ModelProfile): ModelProfile {
+  if (f.tokenizer_mode === "local") {
+    return {
+      ...f,
+      tokenizer_endpoint: undefined,
+      tokenizer_mode: "local",
+    };
+  }
+  return {
+    ...f,
+    tokenizer_mode: "remote",
+    chat_template: undefined,
+    chat_template_sha256: undefined,
+  };
 }
 
 function Check({

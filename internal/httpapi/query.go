@@ -72,6 +72,10 @@ func (s *Service) handleQueryPrefix(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "no model profile for "+req.Model)
 		return
 	}
+	if prof.TokenizerModeOrDefault() == config.TokenizerModeLocal {
+		writeErr(w, http.StatusBadRequest, "tokenizer_mode=local is handled by gateway and does not query KV-cache prefix residency")
+		return
+	}
 	blockSize := req.BlockSize
 	if blockSize <= 0 {
 		blockSize = prof.BlockSize
@@ -145,6 +149,10 @@ func (s *Service) handleTokenizePreview(w http.ResponseWriter, r *http.Request) 
 	}
 	engines := s.Store.EnginesForModel(req.Model)
 	ep := profileTokenizerEndpoint(prof, engines)
+	if prof.TokenizerModeOrDefault() == config.TokenizerModeLocal {
+		writeErr(w, http.StatusBadRequest, "tokenizer_mode=local preview is handled by gateway")
+		return
+	}
 	if ep == "" {
 		writeErr(w, http.StatusBadRequest, "no tokenizer endpoint configured")
 		return

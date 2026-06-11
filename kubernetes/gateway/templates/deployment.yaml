@@ -36,6 +36,10 @@ spec:
           args:
             - -addr={{ .Values.gateway.listenAddress }}
             - -store={{ .Values.gateway.store }}
+            - -mongo-db={{ .Values.gateway.mongo.db }}
+{{- if .Values.localTokenizer.enabled }}
+            - -local-tokenizer-url={{ .Values.localTokenizer.url }}
+{{- end }}
 {{- if and .Values.bootstrap.enabled .Values.gateway.configFiles }}
 {{- $paths := list }}
 {{- range .Values.gateway.configFiles }}
@@ -52,11 +56,17 @@ spec:
                 secretKeyRef:
                   name: {{ include "ucloud-kv-gateway.secretName" . }}
                   key: backend-token
-            - name: KVGATEWAY_MYSQL_DSN
+            - name: KVGATEWAY_MONGO_URI
               valueFrom:
                 secretKeyRef:
                   name: {{ include "ucloud-kv-gateway.secretName" . }}
-                  key: mysql-dsn
+                  key: mongo-uri
+            - name: KVGATEWAY_MONGO_DB
+              value: {{ .Values.gateway.mongo.db | quote }}
+{{- if .Values.localTokenizer.enabled }}
+            - name: KVGATEWAY_LOCAL_TOKENIZER_URL
+              value: {{ .Values.localTokenizer.url | quote }}
+{{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -79,9 +89,50 @@ spec:
               mountPath: /etc/kvindexer/bootstrap
               readOnly: true
 {{- end }}
-{{- if .Values.bootstrap.enabled }}
+{{- if .Values.localTokenizer.enabled }}
+        - name: local-tokenizer
+          image: "{{ .Values.localTokenizer.image.repository }}:{{ .Values.localTokenizer.image.tag }}"
+          imagePullPolicy: {{ .Values.localTokenizer.image.pullPolicy }}
+          ports:
+            - name: tokenizer
+              containerPort: {{ .Values.localTokenizer.port }}
+          env:
+            - name: TOKENIZER_ROOT
+              value: {{ .Values.localTokenizer.tokenizersRoot | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: tokenizer
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: tokenizer
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            - name: local-tokenizers
+              mountPath: {{ .Values.localTokenizer.tokenizersRoot | quote }}
+{{- with .Values.localTokenizer.resources }}
+          resources:
+{{ toYaml . | indent 12 }}
+{{- end }}
+{{- end }}
+{{- if or .Values.bootstrap.enabled .Values.localTokenizer.enabled }}
       volumes:
+{{- if .Values.bootstrap.enabled }}
         - name: bootstrap
           configMap:
             name: {{ include "ucloud-kv-gateway.bootstrapName" . }}
+{{- end }}
+{{- if .Values.localTokenizer.enabled }}
+        - name: local-tokenizers
+{{- if .Values.localTokenizer.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.localTokenizer.persistence.existingClaim | quote }}
+{{- else }}
+          emptyDir: {}
+{{- end }}
+{{- end }}
 {{- end }}

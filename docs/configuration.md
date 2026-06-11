@@ -168,10 +168,10 @@ engines, models, and the policies that should seed that kvindexer. The deploymen
   `-bootstrap <cluster>.yaml -cluster <id> -store mongo -mongo-uri ... -mongo-db ... -auth-token <TOKEN>`.
   It loads only its own cluster from YAML when the Mongo config snapshot is empty and
   subscribes only to its local ZMQ streams.
-- Run **one kvgateway** with a shared connection registry, normally
-  `-store mysql -mysql-dsn <dsn> -configs cluster-a.yaml,cluster-b.yaml -backend-token <TOKEN>`
-  in Kubernetes/production, or `-store sqlite -sqlite-path connections.db ...` for local
-  dev. On first boot it seeds its connection registry from every cluster's `backends`
+- Run **one kvgateway** with a shared MongoDB connection registry and tokenizer asset
+  store:
+  `-store mongo -mongo-uri <uri> -mongo-db <db> -configs cluster-a.yaml,cluster-b.yaml -backend-token <TOKEN>`.
+  On first boot it seeds its connection registry from every cluster's `backends`
   (one row per URL, id `<cluster>-N`) and attaches the token on every hop. Thereafter the
   registry is authoritative and editable via `/admin/connections`. The console points
   only at the gateway.
@@ -190,7 +190,7 @@ State ownership is split:
 | **kvindexer** | `mongo` | dynamic config plus decoded `prefix_cache_events` | `-store mongo -mongo-uri ... -mongo-db ... -bootstrap <cluster>.yaml -cluster <id>` |
 | kvindexer | `memory` (default) | nothing — loads its 1 cluster from YAML each boot | `-store memory -bootstrap <cluster>.yaml -cluster <id>` |
 | kvindexer (standalone) | `sqlite` / `file` | the full config, persisted | `-store sqlite -sqlite-path …` |
-| **kvgateway** | `mysql` / `sqlite` | the connection registry: `{id, cluster, url, token, enabled}` | `-store mysql -mysql-dsn ... -configs a.yaml,b.yaml -backend-token <TOKEN>` |
+| **kvgateway** | `mongo` | connection registry plus local tokenizer zip/chat_template assets | `-store mongo -mongo-uri ... -mongo-db ... -configs a.yaml,b.yaml -backend-token <TOKEN>` |
 
 kvindexer `-store` values:
 
@@ -207,15 +207,15 @@ still empty — which, for `memory`, is *every boot* and for `mongo` means no ac
 
 The gateway's connection registry uses the same **seed-once** rule: it seeds from
 `-config`/`-configs` only when the DB has no rows, then `/admin/connections` is
-authoritative. Drop the gateway DB (`make clean`, delete the local `-sqlite-path` file,
-or truncate the MySQL `connections` table) to re-seed from YAML.
+authoritative. Drop the gateway MongoDB database (or the `connections` collection) to
+re-seed from YAML.
 
 The config has a **version** that bumps on every mutation; hash-affecting profile edits
 bump the profile version (and thus the namespace), which the console warns about.
 
 ## Gateway connection registry (admin API)
 
-When the gateway runs with a connection store (`-store sqlite` or `-store mysql`), it
+When the gateway runs with MongoDB (`-store mongo`), it
 serves a CRUD surface for the kvindexers it federates:
 
 | Method | Path | Body / effect |

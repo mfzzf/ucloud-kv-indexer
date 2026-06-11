@@ -32,6 +32,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/ucloud/kv-indexer/internal/openapi"
+	"github.com/ucloud/kv-indexer/internal/tokenizer"
+	"github.com/ucloud/kv-indexer/internal/types"
 )
 
 // Backend is one kvindexer instance, labelled with the cluster it serves.
@@ -46,10 +48,15 @@ type Backend struct {
 // provider func (backed by the SQL connection store) so admin CRUD edits take
 // effect immediately without a restart.
 type Gateway struct {
-	provider func() []Backend
-	store    *ConnStore // optional: enables /admin/connections CRUD
-	client   *http.Client
-	now      func() time.Time
+	provider  func() []Backend
+	store     Store // optional: enables /admin/connections CRUD and local tokenizer assets
+	client    *http.Client
+	tokenizer *tokenizer.Client
+	now       func() time.Time
+
+	localTokenizerURL string
+	localMu           sync.Mutex
+	localModels       map[string]localTokenizerState
 }
 
 // New builds a gateway over a fixed backend list (kept for tests / static use).
@@ -65,17 +72,25 @@ func NewWithProvider(provider func() []Backend, now func() time.Time) *Gateway {
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		now: now,
+		tokenizer:   tokenizer.New(),
+		localModels: map[string]localTokenizerState{},
+		now:         now,
 	}
 }
 
 // NewWithStore builds a gateway backed by a SQL connection store: the active
 // backend set is the store's enabled connections, and the /admin/connections
 // CRUD endpoints manage them live.
-func NewWithStore(store *ConnStore, now func() time.Time) *Gateway {
+func NewWithStore(store Store, now func() time.Time) *Gateway {
 	g := NewWithProvider(store.Backends, now)
 	g.store = store
 	return g
+}
+
+// SetLocalTokenizerURL enables gateway-local tokenization for model profiles
+// whose tokenizer_mode is local.
+func (g *Gateway) SetLocalTokenizerURL(url string) {
+	g.localTokenizerURL = url
 }
 
 // backends returns the current active backend set.
@@ -271,7 +286,7 @@ func (g *Gateway) handleConfigVersions(w http.ResponseWriter, r *http.Request) {
 		go func(i int, b Backend) {
 			defer wg.Done()
 			v := vres{Cluster: b.Cluster, Backend: b.ID}
-			body, status, err := g.forward(b, http.MethodGet, "/config/versions", nil)
+			body, status, err := g.forward(b, http.MethodGet, "/config/versions", nil, "")
 			if err != nil || status != http.StatusOK {
 				v.Error = errString(err, status, body)
 			} else {
@@ -295,6 +310,14 @@ func (g *Gateway) handleConfigVersions(w http.ResponseWriter, r *http.Request) {
 // It requires the selection to resolve to a single backend; ambiguity or no
 // match is a 400/404 so a write never silently lands in the wrong cluster.
 func (g *Gateway) proxyOne(w http.ResponseWriter, r *http.Request) {
+	var body []byte
+	if r.Body != nil {
+		body, _ = io.ReadAll(r.Body)
+	}
+	g.proxyOneBody(w, r, body, r.Header.Get("Content-Type"))
+}
+
+func (g *Gateway) proxyOneBody(w http.ResponseWriter, r *http.Request, body []byte, contentType string) {
 	backends := g.selected(r)
 	if len(backends) == 0 {
 		writeErr(w, http.StatusNotFound,
@@ -312,11 +335,7 @@ func (g *Gateway) proxyOne(w http.ResponseWriter, r *http.Request) {
 	}
 	b := backends[0]
 
-	var body []byte
-	if r.Body != nil {
-		body, _ = io.ReadAll(r.Body)
-	}
-	respBody, status, err := g.forward(b, r.Method, r.URL.Path, body)
+	respBody, status, err := g.forward(b, r.Method, r.URL.Path, body, contentType)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway,
 			fmt.Sprintf("backend %s (%s): %v", b.ID, b.Cluster, err))
@@ -393,7 +412,7 @@ func (g *Gateway) proxyStreamOne(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (g *Gateway) forward(b Backend, method, path string, body []byte) ([]byte, int, error) {
+func (g *Gateway) forward(b Backend, method, path string, body []byte, contentType string) ([]byte, int, error) {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -402,8 +421,8 @@ func (g *Gateway) forward(b Backend, method, path string, body []byte) ([]byte, 
 	if err != nil {
 		return nil, 0, err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if body != nil && contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	authorize(req, b)
 	resp, err := g.client.Do(req)
@@ -476,18 +495,18 @@ func (g *Gateway) ginRouter() *gin.Engine {
 	r.POST("/engines/register", httpHandler(g.proxyOne))
 	r.POST("/engines/unregister", httpHandler(g.proxyOne))
 	r.PATCH("/engines/:id", httpHandler(g.proxyOne, "id"))
-	r.POST("/model-profiles", httpHandler(g.proxyOne))
+	r.POST("/model-profiles", httpHandler(g.handleModelProfileUpsert))
 	r.POST("/policies", httpHandler(g.proxyOne))
 	r.PATCH("/policies/:id", httpHandler(g.proxyOne, "id"))
 	r.DELETE("/policies/:id", httpHandler(g.proxyOne, "id"))
 
 	// Single-backend admission + query (cluster-targeted).
-	r.POST("/route", httpHandler(g.proxyOne))
-	r.POST("/v1/chat/completions", httpHandler(g.proxyOne))
-	r.POST("/v1/responses", httpHandler(g.proxyOne))
-	r.POST("/v1/messages", httpHandler(g.proxyOne))
-	r.POST("/query-prefix", httpHandler(g.proxyOne))
-	r.POST("/tokenize/preview", httpHandler(g.proxyOne))
+	r.POST("/route", httpHandler(g.handleAdmission(types.ProtocolOpenAIChat)))
+	r.POST("/v1/chat/completions", httpHandler(g.handleAdmission(types.ProtocolOpenAIChat)))
+	r.POST("/v1/responses", httpHandler(g.handleAdmission(types.ProtocolOpenAIResponses)))
+	r.POST("/v1/messages", httpHandler(g.handleAdmission(types.ProtocolAnthropic)))
+	r.POST("/query-prefix", httpHandler(g.handleQueryPrefix))
+	r.POST("/tokenize/preview", httpHandler(g.handleTokenizePreview))
 	r.POST("/config/effective-policy/preview", httpHandler(g.proxyOne))
 
 	return r

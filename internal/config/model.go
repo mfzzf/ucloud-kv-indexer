@@ -14,6 +14,14 @@ const (
 	FrameworkSGLang Framework = "sglang"
 )
 
+// TokenizerMode selects where admission obtains prompt token IDs.
+type TokenizerMode string
+
+const (
+	TokenizerModeRemote TokenizerMode = "remote"
+	TokenizerModeLocal  TokenizerMode = "local"
+)
+
 // Cluster is a placement / management boundary (a site or logical cluster).
 type Cluster struct {
 	ClusterID       string            `json:"cluster_id"`
@@ -57,6 +65,11 @@ type ModelProfile struct {
 	Version   int       `json:"version"`
 	// TokenizerEndpoint may be empty to inherit from the resolved engine.
 	TokenizerEndpoint string `json:"tokenizer_endpoint,omitempty"`
+	// TokenizerMode controls whether admission uses the remote engine tokenizer
+	// or gateway-local tokenizer. Empty means remote for backward compatibility.
+	TokenizerMode TokenizerMode `json:"tokenizer_mode,omitempty"`
+	// ChatTemplateSHA256 records the active chat_template override, when any.
+	ChatTemplateSHA256 string `json:"chat_template_sha256,omitempty"`
 	// HashProfile is an opaque label recorded on decisions, e.g. "vllm-v1-text".
 	HashProfile string `json:"hash_profile"`
 	BlockSize   int    `json:"block_size"`
@@ -71,6 +84,13 @@ type ModelProfile struct {
 // affecting field must change this string (via Version bump).
 func (p ModelProfile) Namespace() string {
 	return p.ModelID + "/v" + itoa(p.Version) + "/" + p.HashProfile + "/" + itoa(p.BlockSize)
+}
+
+func (p ModelProfile) TokenizerModeOrDefault() TokenizerMode {
+	if p.TokenizerMode == TokenizerModeLocal {
+		return TokenizerModeLocal
+	}
+	return TokenizerModeRemote
 }
 
 // RuleCondition is one AND clause inside an admission rule. Every condition in

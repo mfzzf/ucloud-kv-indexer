@@ -2,6 +2,9 @@
 /kvindexer
 *.test
 
+# Python
+__pycache__/
+
 # data snapshots
 /data/*.json
 
@@ -12,3 +15,4 @@ web/.env.local
 
 # Makefile runtime (binaries, logs, pids, mutable config snapshots)
 /run/
+kv-cache-hash/
