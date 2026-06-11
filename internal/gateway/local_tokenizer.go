@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -99,25 +100,34 @@ func (g *Gateway) handleAdmission(proto types.Protocol) http.HandlerFunc {
 
 		model := modelFromBody(body)
 		if model == "" {
+			log.Printf("gateway: admission proxy backend=%s cluster=%s path=%s reason=missing_model", b.ID, b.Cluster, r.URL.Path)
 			g.proxyOneBody(w, r, body, r.Header.Get("Content-Type"))
 			return
 		}
 		prof, hasProfile, err := g.fetchProfile(r.Context(), b, model)
 		if err != nil {
+			log.Printf("gateway: admission profile_error backend=%s cluster=%s path=%s model=%s error=%v", b.ID, b.Cluster, r.URL.Path, model, err)
 			writeErr(w, http.StatusBadGateway, fmt.Sprintf("backend %s (%s): profiles: %v", b.ID, b.Cluster, err))
 			return
 		}
 		if !hasProfile || prof.TokenizerModeOrDefault() != config.TokenizerModeLocal {
+			mode := "missing_profile"
+			if hasProfile {
+				mode = string(prof.TokenizerModeOrDefault())
+			}
+			log.Printf("gateway: admission proxy backend=%s cluster=%s path=%s model=%s tokenizer_mode=%s has_profile=%t", b.ID, b.Cluster, r.URL.Path, model, mode, hasProfile)
 			g.proxyOneBody(w, r, body, r.Header.Get("Content-Type"))
 			return
 		}
 
 		if g.localTokenizerURL == "" {
+			log.Printf("gateway: local admission error backend=%s cluster=%s path=%s model=%s reason=missing_local_tokenizer_url", b.ID, b.Cluster, r.URL.Path, model)
 			writeErr(w, http.StatusInternalServerError, "gateway local tokenizer url is not configured")
 			return
 		}
 		rr, err := normalizeByProtocol(string(prof.Framework), proto, body)
 		if err != nil {
+			log.Printf("gateway: local admission normalize_error backend=%s cluster=%s path=%s model=%s framework=%s error=%v", b.ID, b.Cluster, r.URL.Path, model, prof.Framework, err)
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -125,22 +135,34 @@ func (g *Gateway) handleAdmission(proto types.Protocol) http.HandlerFunc {
 		tok, err := g.tokenizeLocalChat(tctx, b.Cluster, prof, rr)
 		cancel()
 		if err != nil {
+			log.Printf("gateway: local admission tokenize_error backend=%s cluster=%s path=%s model=%s profile_model=%s error=%v", b.ID, b.Cluster, r.URL.Path, rr.Model, prof.ModelID, err)
 			writeErr(w, http.StatusBadGateway, "tokenize: "+err.Error())
 			return
 		}
 
 		policies, err := g.fetchPolicies(r.Context(), b)
 		if err != nil {
+			log.Printf("gateway: local admission policies_error backend=%s cluster=%s path=%s model=%s error=%v", b.ID, b.Cluster, r.URL.Path, rr.Model, err)
 			writeErr(w, http.StatusBadGateway, fmt.Sprintf("backend %s (%s): policies: %v", b.ID, b.Cluster, err))
 			return
 		}
 		engines, err := g.fetchEngines(r.Context(), b)
 		if err != nil {
+			log.Printf("gateway: local admission engines_error backend=%s cluster=%s path=%s model=%s error=%v", b.ID, b.Cluster, r.URL.Path, rr.Model, err)
 			writeErr(w, http.StatusBadGateway, fmt.Sprintf("backend %s (%s): engines: %v", b.ID, b.Cluster, err))
 			return
 		}
 		version := g.fetchConfigVersionBestEffort(r.Context(), b)
 		resp := g.evaluateLocal(rr, prof, tokenOnlyPolicies(policies), enginesForProfile(engines, rr.Model, prof), tok.Count, version, b.Cluster)
+		g.recordAdmissionDecision(b, rr, resp)
+		target := ""
+		if resp.Target != nil {
+			target = resp.Target.EngineID
+		}
+		log.Printf("gateway: local admission backend=%s cluster=%s path=%s model=%s profile_model=%s config_version=%d tokens=%d decision=%s reason=%s status=%d fallback=%t target=%s matched_rule=%s evaluated_rules=%d",
+			b.ID, b.Cluster, r.URL.Path, rr.Model, prof.ModelID, version, tok.Count,
+			resp.Decision, resp.Reason, resp.HTTPStatus, resp.Fallback, target,
+			resp.Config.MatchedRuleID, len(resp.Config.EvaluatedRuleIDs))
 		writeJSON(w, resp.HTTPStatus, resp)
 	}
 }
@@ -366,6 +388,35 @@ func (g *Gateway) evaluateLocal(rr *types.RouteRequest, prof config.ModelProfile
 		resp.Target = target
 	}
 	return resp
+}
+
+func (g *Gateway) recordAdmissionDecision(b Backend, rr *types.RouteRequest, resp routeResponse) {
+	tenant := rr.TenantID
+	if tenant == "" {
+		tenant = "default"
+	}
+	rec := localDecisionRecord{
+		Timestamp:   g.now(),
+		Protocol:    rr.Protocol,
+		Model:       rr.Model,
+		TenantID:    tenant,
+		Decision:    resp.Decision,
+		Reason:      resp.Reason,
+		HTTPStatus:  resp.HTTPStatus,
+		InputTokens: resp.Cache.InputTokens,
+		HitRatio:    resp.Cache.HitRatio,
+		BestHit:     resp.Cache.BestHitTokens,
+		Fallback:    resp.Fallback,
+		ConfigVer:   resp.Config.ConfigVersion,
+		Namespace:   resp.Config.Namespace,
+		Cluster:     b.Cluster,
+		Backend:     b.ID,
+		Source:      "gateway_local_tokenizer",
+	}
+	if resp.Target != nil {
+		rec.TargetEngine = resp.Target.EngineID
+	}
+	g.recordLocalDecision(rec)
 }
 
 func (g *Gateway) selectedOne(w http.ResponseWriter, r *http.Request) (Backend, bool) {

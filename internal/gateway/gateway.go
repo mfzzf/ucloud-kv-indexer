@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ucloud/kv-indexer/internal/admission"
 	"github.com/ucloud/kv-indexer/internal/openapi"
 	"github.com/ucloud/kv-indexer/internal/tokenizer"
 	"github.com/ucloud/kv-indexer/internal/types"
@@ -57,6 +58,10 @@ type Gateway struct {
 	localTokenizerURL string
 	localMu           sync.Mutex
 	localModels       map[string]localTokenizerState
+
+	decMu     sync.Mutex
+	decisions []localDecisionRecord
+	decCap    int
 }
 
 // New builds a gateway over a fixed backend list (kept for tests / static use).
@@ -67,6 +72,9 @@ func New(backends []Backend, now func() time.Time) *Gateway {
 // NewWithProvider builds a gateway whose active backend set is read from provider
 // on every request (so connection-registry edits apply live).
 func NewWithProvider(provider func() []Backend, now func() time.Time) *Gateway {
+	if now == nil {
+		now = time.Now
+	}
 	return &Gateway{
 		provider: provider,
 		client: &http.Client{
@@ -75,6 +83,7 @@ func NewWithProvider(provider func() []Backend, now func() time.Time) *Gateway {
 		tokenizer:   tokenizer.New(),
 		localModels: map[string]localTokenizerState{},
 		now:         now,
+		decCap:      200,
 	}
 }
 
@@ -128,6 +137,26 @@ type backendHealth struct {
 type clusterInfo struct {
 	Cluster  string          `json:"cluster"`
 	Backends []backendHealth `json:"backends"`
+}
+
+type localDecisionRecord struct {
+	Timestamp    time.Time          `json:"timestamp"`
+	Protocol     types.Protocol     `json:"protocol"`
+	Model        string             `json:"model"`
+	TenantID     string             `json:"tenant_id"`
+	Decision     admission.Decision `json:"decision"`
+	Reason       admission.Reason   `json:"reason"`
+	HTTPStatus   int                `json:"http_status"`
+	InputTokens  int                `json:"input_tokens"`
+	HitRatio     float64            `json:"hit_ratio"`
+	BestHit      int                `json:"best_hit_tokens"`
+	TargetEngine string             `json:"target_engine,omitempty"`
+	Fallback     bool               `json:"fallback"`
+	ConfigVer    int                `json:"config_version"`
+	Namespace    string             `json:"namespace"`
+	Cluster      string             `json:"_cluster,omitempty"`
+	Backend      string             `json:"_backend,omitempty"`
+	Source       string             `json:"source,omitempty"`
 }
 
 func (g *Gateway) handleClustersHealth(w http.ResponseWriter, r *http.Request) {
@@ -237,6 +266,92 @@ func (g *Gateway) fanoutList(path string, postMerge func([]map[string]any)) http
 	}
 }
 
+func (g *Gateway) handleDecisions(w http.ResponseWriter, r *http.Request) {
+	backends := g.selected(r)
+	type part struct {
+		items []map[string]any
+	}
+	parts := make([]part, len(backends))
+	var wg sync.WaitGroup
+	for i, b := range backends {
+		wg.Add(1)
+		go func(i int, b Backend) {
+			defer wg.Done()
+			items, err := g.getList(b, "/decisions", r.URL.RawQuery)
+			if err != nil {
+				log.Printf("gateway: backend %s (%s) /decisions: %v", b.ID, b.Cluster, err)
+				return
+			}
+			for _, it := range items {
+				it["_cluster"] = b.Cluster
+				it["_backend"] = b.ID
+			}
+			parts[i] = part{items: items}
+		}(i, b)
+	}
+	wg.Wait()
+
+	merged := []map[string]any{}
+	for _, p := range parts {
+		merged = append(merged, p.items...)
+	}
+	merged = append(merged, g.localDecisionsFor(backends)...)
+	sortByTimestampAsc(merged)
+	writeJSON(w, http.StatusOK, merged)
+}
+
+func (g *Gateway) localDecisionsFor(backends []Backend) []map[string]any {
+	if len(backends) == 0 {
+		return nil
+	}
+	allowed := map[string]struct{}{}
+	for _, b := range backends {
+		allowed[b.ID] = struct{}{}
+	}
+	g.decMu.Lock()
+	defer g.decMu.Unlock()
+	out := make([]map[string]any, 0, len(g.decisions))
+	for _, rec := range g.decisions {
+		if len(allowed) > 0 {
+			if _, ok := allowed[rec.Backend]; !ok {
+				continue
+			}
+		}
+		item := map[string]any{
+			"timestamp":       rec.Timestamp.Format(time.RFC3339Nano),
+			"protocol":        rec.Protocol,
+			"model":           rec.Model,
+			"tenant_id":       rec.TenantID,
+			"decision":        rec.Decision,
+			"reason":          rec.Reason,
+			"http_status":     rec.HTTPStatus,
+			"input_tokens":    rec.InputTokens,
+			"hit_ratio":       rec.HitRatio,
+			"best_hit_tokens": rec.BestHit,
+			"fallback":        rec.Fallback,
+			"config_version":  rec.ConfigVer,
+			"namespace":       rec.Namespace,
+			"_cluster":        rec.Cluster,
+			"_backend":        rec.Backend,
+			"source":          rec.Source,
+		}
+		if rec.TargetEngine != "" {
+			item["target_engine"] = rec.TargetEngine
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func (g *Gateway) recordLocalDecision(rec localDecisionRecord) {
+	g.decMu.Lock()
+	defer g.decMu.Unlock()
+	g.decisions = append(g.decisions, rec)
+	if len(g.decisions) > g.decCap {
+		g.decisions = g.decisions[len(g.decisions)-g.decCap:]
+	}
+}
+
 func (g *Gateway) getList(b Backend, path, rawQuery string) ([]map[string]any, error) {
 	target := b.URL + path
 	if rawQuery != "" {
@@ -337,10 +452,12 @@ func (g *Gateway) proxyOneBody(w http.ResponseWriter, r *http.Request, body []by
 
 	respBody, status, err := g.forward(b, r.Method, r.URL.Path, body, contentType)
 	if err != nil {
+		log.Printf("gateway: proxy backend=%s cluster=%s method=%s path=%s error=%v", b.ID, b.Cluster, r.Method, r.URL.Path, err)
 		writeErr(w, http.StatusBadGateway,
 			fmt.Sprintf("backend %s (%s): %v", b.ID, b.Cluster, err))
 		return
 	}
+	log.Printf("gateway: proxy backend=%s cluster=%s method=%s path=%s status=%d bytes=%d", b.ID, b.Cluster, r.Method, r.URL.Path, status, len(respBody))
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-KVI-Backend", b.ID)
 	w.Header().Set("X-KVI-Cluster", b.Cluster)
@@ -483,7 +600,7 @@ func (g *Gateway) ginRouter() *gin.Engine {
 	r.GET("/kv-events/recent", httpHandler(g.fanoutList("/kv-events/recent", sortByObservedAtAsc)))
 	r.GET("/kv-events/stream", httpHandler(g.proxyStreamOne))
 	r.GET("/index/stats", httpHandler(g.fanoutList("/index/stats", nil)))
-	r.GET("/decisions", httpHandler(g.fanoutList("/decisions", sortByTimestampAsc)))
+	r.GET("/decisions", httpHandler(g.handleDecisions))
 	r.GET("/config/audit-log", httpHandler(g.fanoutList("/config/audit-log", sortByVersionAsc)))
 
 	// Aggregate object.

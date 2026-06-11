@@ -95,6 +95,8 @@ func TestGatewayLocalTokenizerModeSkipsBackendRouteAndCachePolicy(t *testing.T) 
 			}})
 		case r.Method == http.MethodGet && r.URL.Path == "/config/versions":
 			writeJSON(w, http.StatusOK, map[string]any{"config_version": 7})
+		case r.Method == http.MethodGet && r.URL.Path == "/decisions":
+			writeJSON(w, http.StatusOK, []map[string]any{})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 			backendRouteCalls.Add(1)
 			writeJSON(w, http.StatusOK, map[string]any{"unexpected": true})
@@ -142,5 +144,30 @@ func TestGatewayLocalTokenizerModeSkipsBackendRouteAndCachePolicy(t *testing.T) 
 	}
 	if got := backendRouteCalls.Load(); got != 0 {
 		t.Fatalf("backend route should not be called in local mode, got %d calls", got)
+	}
+
+	code, body = doJSON(t, h, http.MethodGet, "/decisions?cluster=c0", "")
+	if code != http.StatusOK {
+		t.Fatalf("decisions status=%d body=%s", code, body)
+	}
+	var decisions []map[string]any
+	if err := json.Unmarshal([]byte(body), &decisions); err != nil {
+		t.Fatalf("decode decisions: %v", err)
+	}
+	if len(decisions) != 2 {
+		t.Fatalf("gateway should expose local-tokenizer decisions, got %d: %s", len(decisions), body)
+	}
+	for _, rec := range decisions {
+		if rec["source"] != "gateway_local_tokenizer" || rec["_cluster"] != "c0" || rec["_backend"] != "idx-0" {
+			t.Fatalf("local decision missing gateway tags/source: %v", rec)
+		}
+	}
+	accepted := decisions[0]
+	rejected := decisions[1]
+	if accepted["decision"] != "accept" || accepted["target_engine"] != "e0" || accepted["input_tokens"].(float64) != 3 {
+		t.Fatalf("accepted local decision missing target/token count: %v", accepted)
+	}
+	if rejected["decision"] != "reject" || rejected["input_tokens"].(float64) != 4 {
+		t.Fatalf("rejected local decision missing token count: %v", rejected)
 	}
 }

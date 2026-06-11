@@ -56,7 +56,7 @@ bootstrap:
 
 gateway:
   name: kvgateway
-  replicas: 2
+  replicas: 1
   listenAddress: ":8095"
   port: 8095
   store: mongo
