@@ -5,6 +5,10 @@ metadata:
   namespace: {{ include "ucloud-kv-gateway.namespace" . }}
   labels:
 {{ include "ucloud-kv-gateway.labels" . | indent 4 }}
+{{- with .Values.gateway.service.annotations }}
+  annotations:
+{{ toYaml . | indent 4 }}
+{{- end }}
 spec:
   type: {{ .Values.gateway.service.type }}
   ports:

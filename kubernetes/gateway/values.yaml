@@ -65,7 +65,10 @@ gateway:
   # configFiles:
   #   - th-gb200.yaml
   service:
-    type: ClusterIP
+    type: LoadBalancer
+    annotations:
+      service.beta.kubernetes.io/ucloud-load-balancer-listentype: network
+      service.beta.kubernetes.io/ucloud-load-balancer-type: inner
   resources:
     requests:
       cpu: "8"
