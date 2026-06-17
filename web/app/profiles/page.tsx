@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, AlertTriangle, Upload } from "lucide-react";
-import { api, ModelProfile } from "@/lib/api";
+import { api, IndexerConnection, ModelProfile } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -46,6 +46,11 @@ export default function ProfilesPage() {
   const profiles = useQuery({
     queryKey: ["profiles", cluster],
     queryFn: () => api.get<ModelProfile[]>(clusterQ("/model-profiles", cluster)),
+  });
+  const indexerConnections = useQuery({
+    queryKey: ["indexer-connections"],
+    queryFn: () => api.get<IndexerConnection[]>("/admin/connections"),
+    retry: false,
   });
   const [editing, setEditing] = React.useState<ModelProfile | null>(null);
   const [creating, setCreating] = React.useState(false);
@@ -92,6 +97,8 @@ export default function ProfilesPage() {
               initial={editing}
               existing={existing}
               cluster={cluster}
+              connections={indexerConnections.data ?? []}
+              registryAvailable={indexerConnections.isSuccess}
               onDone={() => {
                 close();
                 qc.invalidateQueries({ queryKey: ["profiles"] });
@@ -235,25 +242,52 @@ function ProfileForm({
   initial,
   existing,
   cluster,
+  connections,
+  registryAvailable,
   onDone,
   onCancel,
 }: {
   initial: ModelProfile;
   existing?: ModelProfile;
   cluster: string;
+  connections: IndexerConnection[];
+  registryAvailable: boolean;
   onDone: () => void;
   onCancel: () => void;
 }) {
   const t = useT();
   const [f, setF] = React.useState<ModelProfile>(initial);
+  const [targetBackend, setTargetBackend] = React.useState(initial._backend ?? "");
   const [tokenizerZip, setTokenizerZip] = React.useState<File | null>(null);
   const [chatTemplateFile, setChatTemplateFile] = React.useState<File | null>(null);
   const [err, setErr] = React.useState("");
+  const targetOptions = React.useMemo(
+    () => connections.filter((c) => c.enabled),
+    [connections],
+  );
+  React.useEffect(() => {
+    if (existing || !registryAvailable || targetBackend) return;
+    const matchingCluster =
+      cluster !== "all"
+        ? targetOptions.find((c) => c.cluster === cluster)
+        : undefined;
+    setTargetBackend((matchingCluster ?? targetOptions[0])?.id ?? "");
+  }, [cluster, existing, registryAvailable, targetBackend, targetOptions]);
+  const selectedTarget = targetOptions.find((c) => c.id === targetBackend);
+  const virtualTarget =
+    initial._virtual || (!existing && selectedTarget?.kind === "virtual");
+  React.useEffect(() => {
+    if (virtualTarget && f.tokenizer_mode !== "local") {
+      setF((prev) => ({ ...prev, tokenizer_mode: "local" }));
+    }
+  }, [f.tokenizer_mode, virtualTarget]);
   const save = useMutation({
     // Editing routes to the row's own backend; creating uses the selected cluster.
     mutationFn: () => {
       const target = initial._backend
         ? backendQ("/model-profiles", initial._backend)
+        : targetBackend
+          ? backendQ("/model-profiles", targetBackend)
         : clusterQ("/model-profiles", cluster);
       const payload = profileForSave(f);
       const hasLocalUpload =
@@ -261,6 +295,12 @@ function ProfileForm({
         (tokenizerZip || chatTemplateFile || Boolean(f.chat_template));
       if (!hasLocalUpload) {
         return api.post<ModelProfile>(target, payload);
+      }
+      if (tokenizerZip && tokenizerZip.size === 0) {
+        throw new Error(t("profiles.error.empty_tokenizer_zip"));
+      }
+      if (chatTemplateFile && chatTemplateFile.size === 0) {
+        throw new Error(t("profiles.error.empty_template_file"));
       }
       const body = new FormData();
       appendProfileForm(body, payload);
@@ -295,6 +335,36 @@ function ProfileForm({
   return (
     <div className="flex flex-1 flex-col">
       <div className="grid gap-4 overflow-y-auto px-6 pb-6 sm:grid-cols-2">
+        {!existing && registryAvailable && (
+          <div className="space-y-2 sm:col-span-2">
+            <Label>{t("profiles.field.target_backend")}</Label>
+            <Select
+              value={targetBackend}
+              onValueChange={(v) => {
+                setTargetBackend(v);
+                const next = targetOptions.find((c) => c.id === v);
+                if (next?.kind === "virtual") {
+                  setF((prev) => ({ ...prev, tokenizer_mode: "local" }));
+                }
+              }}
+              disabled={targetOptions.length === 0}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {targetOptions.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.cluster} · {c.id}
+                    {c.kind === "virtual"
+                      ? ` · ${t("indexers.kind.virtual")}`
+                      : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         <div className="space-y-2">
           <Label>{t("profiles.field.model")}</Label>
           <Input
@@ -339,6 +409,7 @@ function ProfileForm({
           <Select
             value={f.tokenizer_mode || "remote"}
             onValueChange={setS("tokenizer_mode")}
+            disabled={virtualTarget}
           >
             <SelectTrigger className="w-full">
               <SelectValue />
@@ -437,7 +508,13 @@ function ProfileForm({
           <Button variant="outline" onClick={onCancel}>
             {t("common.cancel")}
           </Button>
-          <Button onClick={() => save.mutate()} disabled={!f.model_id}>
+          <Button
+            onClick={() => save.mutate()}
+            disabled={
+              !f.model_id ||
+              (!existing && registryAvailable && !targetBackend)
+            }
+          >
             {f.tokenizer_mode === "local" && (tokenizerZip || chatTemplateFile) && (
               <Upload />
             )}

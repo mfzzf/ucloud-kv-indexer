@@ -237,6 +237,213 @@ func TestAdminConnectionsCRUDPreservesOmittedFields(t *testing.T) {
 	}
 }
 
+func TestVirtualConnectionDoesNotRequireURL(t *testing.T) {
+	store := NewMemoryStore()
+	defer store.Close()
+
+	h := NewWithStore(store, time.Now).Router()
+
+	code, body := doJSON(t, h, http.MethodPost, "/admin/connections", `{
+		"id":"virt-0",
+		"kind":"virtual",
+		"cluster":"local-tokenizer",
+		"display_name":"Local Tokenizer",
+		"enabled":true
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("virtual create status %d body %s", code, body)
+	}
+
+	conns := store.List()
+	if len(conns) != 1 {
+		t.Fatalf("connections=%d want 1", len(conns))
+	}
+	if conns[0].Kind != ConnectionKindVirtual || conns[0].URL != "" || conns[0].Cluster != "local-tokenizer" {
+		t.Fatalf("virtual connection not stored correctly: %+v", conns[0])
+	}
+	if got := store.Backends(); len(got) != 0 {
+		t.Fatalf("virtual connection should not become a real backend: %+v", got)
+	}
+
+	code, body = doJSON(t, h, http.MethodPost, "/admin/connections", `{
+		"id":"bad-backend",
+		"kind":"backend",
+		"cluster":"local-tokenizer"
+	}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("backend without url status %d body %s", code, body)
+	}
+}
+
+func TestVirtualConnectionHealthAndModelProfiles(t *testing.T) {
+	store := NewMemoryStore()
+	defer store.Close()
+
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"model_id":                "local-model",
+			"chat_template_sha256":    "",
+			"tokenizer_dir":           "/tokenizers/local-model",
+			"tokenizer_config_sha256": "",
+		})
+	}))
+	defer local.Close()
+
+	g := NewWithStore(store, time.Now)
+	g.SetLocalTokenizerURL(local.URL)
+	h := g.Router()
+
+	code, body := doJSON(t, h, http.MethodPost, "/admin/connections", `{
+		"id":"virt-0",
+		"kind":"virtual",
+		"cluster":"local-tokenizer",
+		"display_name":"Local Tokenizer",
+		"enabled":true
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("virtual connection create status %d body %s", code, body)
+	}
+
+	code, body = doJSON(t, h, http.MethodGet, "/clusters-health", "")
+	if code != http.StatusOK {
+		t.Fatalf("clusters-health status %d body %s", code, body)
+	}
+	var health []clusterInfo
+	if err := json.Unmarshal([]byte(body), &health); err != nil {
+		t.Fatal(err)
+	}
+	if len(health) != 1 || health[0].Cluster != "local-tokenizer" || len(health[0].Backends) != 1 {
+		t.Fatalf("virtual health missing cluster/backend: %+v", health)
+	}
+	if !health[0].Backends[0].Healthy || !health[0].Backends[0].Virtual {
+		t.Fatalf("virtual health should be healthy and tagged virtual: %+v", health[0].Backends[0])
+	}
+
+	code, body = doJSON(t, h, http.MethodPost, "/model-profiles?backend=virt-0", `{
+		"model_id":"local-model",
+		"framework":"sglang",
+		"tokenizer_mode":"remote",
+		"hash_profile":"sglang-v1-text",
+		"block_size":16,
+		"hash_seed":"0"
+	}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("remote virtual profile status %d body %s", code, body)
+	}
+
+	_, err := store.PutTokenizerAsset(t.Context(), TokenizerAssetInput{
+		Cluster:      "local-tokenizer",
+		ModelID:      "local-model",
+		TokenizerZip: []byte("zip-bytes"),
+	})
+	if err != nil {
+		t.Fatalf("put tokenizer asset: %v", err)
+	}
+	code, body = doJSON(t, h, http.MethodPost, "/model-profiles?backend=virt-0", `{
+		"model_id":"local-model",
+		"framework":"sglang",
+		"tokenizer_mode":"local",
+		"hash_profile":"sglang-v1-text",
+		"block_size":16,
+		"hash_seed":"0"
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("local virtual profile status %d body %s", code, body)
+	}
+
+	code, body = doJSON(t, h, http.MethodGet, "/model-profiles?backend=virt-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("list virtual profiles status %d body %s", code, body)
+	}
+	var profiles []map[string]any
+	if err := json.Unmarshal([]byte(body), &profiles); err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("profiles=%d want 1 body %s", len(profiles), body)
+	}
+	if profiles[0]["model_id"] != "local-model" || profiles[0]["_cluster"] != "local-tokenizer" ||
+		profiles[0]["_backend"] != "virt-0" || profiles[0]["_virtual"] != true {
+		t.Fatalf("virtual profile missing tags: %+v", profiles[0])
+	}
+}
+
+func TestVirtualPolicyPatchAndDelete(t *testing.T) {
+	store := NewMemoryStore()
+	defer store.Close()
+	h := NewWithStore(store, time.Now).Router()
+
+	code, body := doJSON(t, h, http.MethodPost, "/admin/connections", `{
+		"id":"virt-0",
+		"kind":"virtual",
+		"cluster":"local-tokenizer",
+		"enabled":true
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("virtual connection create status %d body %s", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodPost, "/policies?backend=virt-0", `{
+		"rule_id":"limit",
+		"priority":10,
+		"action":{"type":"accept"}
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("virtual policy create status %d body %s", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodPost, "/config/effective-policy/preview?backend=virt-0", `{
+		"cluster_id":"local-tokenizer",
+		"model_id":"local-model",
+		"input_tokens":4
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("virtual policy preview status %d body %s", code, body)
+	}
+	if !strings.Contains(body, `"matched_rule_id":"limit"`) {
+		t.Fatalf("virtual policy preview should evaluate virtual rule: %s", body)
+	}
+	code, body = doJSON(t, h, http.MethodPatch, "/policies/limit?backend=virt-0", `{
+		"rule_id":"ignored",
+		"name":"Token limit",
+		"priority":20,
+		"action":{"type":"reject","reject_status":429},
+		"enabled":false
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("virtual policy patch status %d body %s", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodGet, "/policies?backend=virt-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("virtual policy list status %d body %s", code, body)
+	}
+	var policies []map[string]any
+	if err := json.Unmarshal([]byte(body), &policies); err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 1 || policies[0]["rule_id"] != "limit" ||
+		policies[0]["name"] != "Token limit" || policies[0]["priority"].(float64) != 20 ||
+		policies[0]["enabled"] != false {
+		t.Fatalf("virtual policy patch not reflected: %+v", policies)
+	}
+	code, body = doJSON(t, h, http.MethodDelete, "/policies/limit?backend=virt-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("virtual policy delete status %d body %s", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodGet, "/policies?backend=virt-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("virtual policy list after delete status %d body %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &policies); err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 0 {
+		t.Fatalf("virtual policy delete left rows: %+v", policies)
+	}
+}
+
 func TestConfigVersionsAggregate(t *testing.T) {
 	g, cleanup := newTestGateway(t)
 	defer cleanup()

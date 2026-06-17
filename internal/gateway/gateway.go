@@ -21,6 +21,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/ucloud/kv-indexer/internal/admission"
+	"github.com/ucloud/kv-indexer/internal/config"
 	"github.com/ucloud/kv-indexer/internal/openapi"
 	"github.com/ucloud/kv-indexer/internal/tokenizer"
 	"github.com/ucloud/kv-indexer/internal/types"
@@ -105,6 +107,20 @@ func (g *Gateway) SetLocalTokenizerURL(url string) {
 // backends returns the current active backend set.
 func (g *Gateway) backends() []Backend { return g.provider() }
 
+func (g *Gateway) virtualConnections() []Connection {
+	if g.store == nil {
+		return nil
+	}
+	conns := g.store.List()
+	out := make([]Connection, 0, len(conns))
+	for _, c := range conns {
+		if c.Enabled && c.KindOrDefault() == ConnectionKindVirtual {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // ---- backend selection ----
 
 // selected returns the backends matching the request's ?cluster= / ?backend=
@@ -125,6 +141,70 @@ func (g *Gateway) selected(r *http.Request) []Backend {
 	return out
 }
 
+func (g *Gateway) selectedVirtual(r *http.Request) []Connection {
+	cluster := r.URL.Query().Get("cluster")
+	backendID := r.URL.Query().Get("backend")
+	var out []Connection
+	for _, c := range g.virtualConnections() {
+		if backendID != "" && c.ID != backendID {
+			continue
+		}
+		if cluster != "" && cluster != "all" && c.Cluster != cluster {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+type gatewayTarget struct {
+	Backend    Backend
+	Connection Connection
+	Virtual    bool
+}
+
+func (t gatewayTarget) id() string {
+	if t.Virtual {
+		return t.Connection.ID
+	}
+	return t.Backend.ID
+}
+
+func (t gatewayTarget) cluster() string {
+	if t.Virtual {
+		return t.Connection.Cluster
+	}
+	return t.Backend.Cluster
+}
+
+func (g *Gateway) selectedTargets(r *http.Request) []gatewayTarget {
+	var out []gatewayTarget
+	for _, b := range g.selected(r) {
+		out = append(out, gatewayTarget{Backend: b})
+	}
+	for _, c := range g.selectedVirtual(r) {
+		out = append(out, gatewayTarget{Connection: c, Virtual: true})
+	}
+	return out
+}
+
+func (g *Gateway) selectedOneTarget(w http.ResponseWriter, r *http.Request) (gatewayTarget, bool) {
+	targets := g.selectedTargets(r)
+	if len(targets) == 0 {
+		writeErr(w, http.StatusNotFound, "no backend matches cluster/backend selector; pass ?cluster= or ?backend=")
+		return gatewayTarget{}, false
+	}
+	if len(targets) > 1 {
+		ids := make([]string, len(targets))
+		for i, t := range targets {
+			ids[i] = t.id()
+		}
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("ambiguous target (%d backends: %v); pass ?backend= to disambiguate", len(targets), ids))
+		return gatewayTarget{}, false
+	}
+	return targets[0], true
+}
+
 // ---- cluster listing + health ----
 
 type backendHealth struct {
@@ -132,6 +212,7 @@ type backendHealth struct {
 	URL     string `json:"url"`
 	Healthy bool   `json:"healthy"`
 	Error   string `json:"error,omitempty"`
+	Virtual bool   `json:"virtual,omitempty"`
 }
 
 type clusterInfo struct {
@@ -199,6 +280,15 @@ func (g *Gateway) handleClustersHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		ci.Backends = append(ci.Backends, r.bh)
 	}
+	for _, c := range g.virtualConnections() {
+		ci, ok := byCluster[c.Cluster]
+		if !ok {
+			ci = &clusterInfo{Cluster: c.Cluster}
+			byCluster[c.Cluster] = ci
+			order = append(order, c.Cluster)
+		}
+		ci.Backends = append(ci.Backends, backendHealth{ID: c.ID, Healthy: true, Virtual: true})
+	}
 	out := make([]clusterInfo, 0, len(order))
 	for _, c := range order {
 		out = append(out, *byCluster[c])
@@ -259,6 +349,7 @@ func (g *Gateway) fanoutList(path string, postMerge func([]map[string]any)) http
 		for _, p := range parts {
 			merged = append(merged, p.items...)
 		}
+		merged = append(merged, g.virtualList(r.Context(), path, r)...)
 		if postMerge != nil {
 			postMerge(merged)
 		}
@@ -295,18 +386,18 @@ func (g *Gateway) handleDecisions(w http.ResponseWriter, r *http.Request) {
 	for _, p := range parts {
 		merged = append(merged, p.items...)
 	}
-	merged = append(merged, g.localDecisionsFor(backends)...)
+	merged = append(merged, g.localDecisionsForTargets(g.selectedTargets(r))...)
 	sortByTimestampAsc(merged)
 	writeJSON(w, http.StatusOK, merged)
 }
 
-func (g *Gateway) localDecisionsFor(backends []Backend) []map[string]any {
-	if len(backends) == 0 {
+func (g *Gateway) localDecisionsForTargets(targets []gatewayTarget) []map[string]any {
+	if len(targets) == 0 {
 		return nil
 	}
 	allowed := map[string]struct{}{}
-	for _, b := range backends {
-		allowed[b.ID] = struct{}{}
+	for _, t := range targets {
+		allowed[t.id()] = struct{}{}
 	}
 	g.decMu.Lock()
 	defer g.decMu.Unlock()
@@ -384,6 +475,61 @@ func (g *Gateway) getList(b Backend, path, rawQuery string) ([]map[string]any, e
 	return items, nil
 }
 
+func (g *Gateway) virtualList(ctx context.Context, path string, r *http.Request) []map[string]any {
+	if g.store == nil {
+		return nil
+	}
+	var merged []map[string]any
+	for _, c := range g.selectedVirtual(r) {
+		vc, err := g.store.GetVirtualConfig(ctx, c.ID)
+		if err != nil {
+			log.Printf("gateway: virtual backend %s (%s) %s: %v", c.ID, c.Cluster, path, err)
+			continue
+		}
+		var rows []any
+		switch path {
+		case "/clusters":
+			for _, item := range vc.Snapshot.Clusters {
+				rows = append(rows, item)
+			}
+		case "/model-profiles":
+			for _, item := range vc.Snapshot.Profiles {
+				rows = append(rows, item)
+			}
+		case "/policies":
+			for _, item := range vc.Snapshot.Policies {
+				rows = append(rows, item)
+			}
+		default:
+			continue
+		}
+		for _, row := range rows {
+			item, err := structToMap(row)
+			if err != nil {
+				log.Printf("gateway: virtual backend %s (%s) map %s: %v", c.ID, c.Cluster, path, err)
+				continue
+			}
+			item["_cluster"] = c.Cluster
+			item["_backend"] = c.ID
+			item["_virtual"] = true
+			merged = append(merged, item)
+		}
+	}
+	return merged
+}
+
+func structToMap(v any) (map[string]any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ---- config/versions aggregate (object, not array) ----
 
 func (g *Gateway) handleConfigVersions(w http.ResponseWriter, r *http.Request) {
@@ -416,6 +562,14 @@ func (g *Gateway) handleConfigVersions(w http.ResponseWriter, r *http.Request) {
 		}(i, b)
 	}
 	wg.Wait()
+	for _, vc := range g.selectedVirtual(r) {
+		cfg, err := g.store.GetVirtualConfig(r.Context(), vc.ID)
+		row := vres{Cluster: vc.Cluster, Backend: vc.ID, ConfigVersion: cfg.Snapshot.Version}
+		if err != nil {
+			row.Error = err.Error()
+		}
+		out = append(out, row)
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -430,6 +584,180 @@ func (g *Gateway) proxyOne(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
 	}
 	g.proxyOneBody(w, r, body, r.Header.Get("Content-Type"))
+}
+
+type effectivePolicyPreviewRequest struct {
+	ClusterID     string   `json:"cluster_id,omitempty"`
+	ModelID       string   `json:"model_id,omitempty"`
+	TenantID      string   `json:"tenant_id,omitempty"`
+	InputTokens   int      `json:"input_tokens,omitempty"`
+	HitRatio      *float64 `json:"hit_ratio,omitempty"`
+	Fresh         *bool    `json:"fresh,omitempty"`
+	Tokenized     *bool    `json:"tokenized,omitempty"`
+	HashSupported *bool    `json:"hash_supported,omitempty"`
+	HasCandidates *bool    `json:"has_candidates,omitempty"`
+}
+
+type effectivePolicyPreviewResponse struct {
+	Rules  []config.Policy  `json:"rules"`
+	Result admission.Result `json:"result"`
+}
+
+func (g *Gateway) handleEffectivePolicyPreview(w http.ResponseWriter, r *http.Request) {
+	body, err := readRawBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	target, ok := g.selectedOneTarget(w, r)
+	if !ok {
+		return
+	}
+	if !target.Virtual {
+		g.proxyOneBody(w, r, body, r.Header.Get("Content-Type"))
+		return
+	}
+	var req effectivePolicyPreviewRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	vc, err := g.store.GetVirtualConfig(r.Context(), target.id())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "virtual config: "+err.Error())
+		return
+	}
+	rules := tokenOnlyPolicies(snapshotPolicies(vc.Snapshot))
+	result := evaluateEffectivePolicyPreview(req, rules)
+	writeJSON(w, http.StatusOK, effectivePolicyPreviewResponse{Rules: rules, Result: result})
+}
+
+func evaluateEffectivePolicyPreview(req effectivePolicyPreviewRequest, rules []config.Policy) admission.Result {
+	fresh, tokenized, hashSupported, hasCandidates := true, true, true, true
+	if req.Fresh != nil {
+		fresh = *req.Fresh
+	}
+	if req.Tokenized != nil {
+		tokenized = *req.Tokenized
+	}
+	if req.HashSupported != nil {
+		hashSupported = *req.HashSupported
+	}
+	if req.HasCandidates != nil {
+		hasCandidates = *req.HasCandidates
+	}
+	var hitOverride *admission.HitInfo
+	if req.HitRatio != nil {
+		ratio := *req.HitRatio
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		eff := int(float64(req.InputTokens) * ratio)
+		hitOverride = &admission.HitInfo{
+			InputTokens:           req.InputTokens,
+			BestHitTokens:         eff,
+			HitRatio:              ratio,
+			EffectiveCachedTokens: eff,
+		}
+	}
+	return admission.Evaluate(admission.Input{
+		ClusterID:     req.ClusterID,
+		ModelID:       req.ModelID,
+		TenantID:      req.TenantID,
+		InputTokens:   req.InputTokens,
+		Rules:         rules,
+		HitOverride:   hitOverride,
+		Fresh:         fresh,
+		Tokenized:     tokenized,
+		HashSupported: hashSupported,
+		HasCandidates: hasCandidates,
+	})
+}
+
+func (g *Gateway) handlePolicyUpsert(w http.ResponseWriter, r *http.Request) {
+	body, err := readRawBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	target, ok := g.selectedOneTarget(w, r)
+	if !ok {
+		return
+	}
+	if !target.Virtual {
+		g.proxyOneBody(w, r, body, r.Header.Get("Content-Type"))
+		return
+	}
+	var policy config.Policy
+	if err := json.Unmarshal(body, &policy); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if policy.RuleID == "" {
+		writeErr(w, http.StatusBadRequest, "rule_id required")
+		return
+	}
+	stored, err := g.store.UpsertVirtualPolicy(r.Context(), target.id(), policy)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "store virtual policy: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stored)
+}
+
+func (g *Gateway) handlePolicyPatch(w http.ResponseWriter, r *http.Request) {
+	body, err := readRawBody(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	target, ok := g.selectedOneTarget(w, r)
+	if !ok {
+		return
+	}
+	if !target.Virtual {
+		g.proxyOneBody(w, r, body, r.Header.Get("Content-Type"))
+		return
+	}
+	var patch config.Policy
+	if err := json.Unmarshal(body, &patch); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ok, err = g.store.PatchVirtualPolicy(r.Context(), target.id(), r.PathValue("id"), patch)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "patch virtual policy: "+err.Error())
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "policy not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (g *Gateway) handlePolicyDelete(w http.ResponseWriter, r *http.Request) {
+	target, ok := g.selectedOneTarget(w, r)
+	if !ok {
+		return
+	}
+	if !target.Virtual {
+		g.proxyOne(w, r)
+		return
+	}
+	ok, err := g.store.RemoveVirtualPolicy(r.Context(), target.id(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "delete virtual policy: "+err.Error())
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "policy not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (g *Gateway) proxyOneBody(w http.ResponseWriter, r *http.Request, body []byte, contentType string) {
@@ -613,9 +941,9 @@ func (g *Gateway) ginRouter() *gin.Engine {
 	r.POST("/engines/unregister", httpHandler(g.proxyOne))
 	r.PATCH("/engines/:id", httpHandler(g.proxyOne, "id"))
 	r.POST("/model-profiles", httpHandler(g.handleModelProfileUpsert))
-	r.POST("/policies", httpHandler(g.proxyOne))
-	r.PATCH("/policies/:id", httpHandler(g.proxyOne, "id"))
-	r.DELETE("/policies/:id", httpHandler(g.proxyOne, "id"))
+	r.POST("/policies", httpHandler(g.handlePolicyUpsert))
+	r.PATCH("/policies/:id", httpHandler(g.handlePolicyPatch, "id"))
+	r.DELETE("/policies/:id", httpHandler(g.handlePolicyDelete, "id"))
 
 	// Single-backend admission + query (cluster-targeted).
 	r.POST("/route", httpHandler(g.handleAdmission(types.ProtocolOpenAIChat)))
@@ -624,7 +952,7 @@ func (g *Gateway) ginRouter() *gin.Engine {
 	r.POST("/v1/messages", httpHandler(g.handleAdmission(types.ProtocolAnthropic)))
 	r.POST("/query-prefix", httpHandler(g.handleQueryPrefix))
 	r.POST("/tokenize/preview", httpHandler(g.handleTokenizePreview))
-	r.POST("/config/effective-policy/preview", httpHandler(g.proxyOne))
+	r.POST("/config/effective-policy/preview", httpHandler(g.handleEffectivePolicyPreview))
 
 	return r
 }
@@ -645,33 +973,53 @@ func httpHandler(h http.HandlerFunc, pathParams ...string) gin.HandlerFunc {
 // gateway via its own API.
 func (g *Gateway) handleListConnections(w http.ResponseWriter, r *http.Request) {
 	type view struct {
-		ID       string `json:"id"`
-		Cluster  string `json:"cluster"`
-		URL      string `json:"url"`
-		HasToken bool   `json:"has_token"`
-		Enabled  bool   `json:"enabled"`
+		ID          string            `json:"id"`
+		Kind        string            `json:"kind"`
+		Cluster     string            `json:"cluster"`
+		DisplayName string            `json:"display_name,omitempty"`
+		Region      string            `json:"region,omitempty"`
+		Environment string            `json:"environment,omitempty"`
+		Labels      map[string]string `json:"labels,omitempty"`
+		URL         string            `json:"url"`
+		HasToken    bool              `json:"has_token"`
+		Enabled     bool              `json:"enabled"`
 	}
 	conns := g.store.List()
 	out := make([]view, 0, len(conns))
 	for _, c := range conns {
-		out = append(out, view{ID: c.ID, Cluster: c.Cluster, URL: c.URL, HasToken: c.Token != "", Enabled: c.Enabled})
+		out = append(out, view{
+			ID:          c.ID,
+			Kind:        c.KindOrDefault(),
+			Cluster:     c.Cluster,
+			DisplayName: c.DisplayName,
+			Region:      c.Region,
+			Environment: c.Environment,
+			Labels:      c.Labels,
+			URL:         c.URL,
+			HasToken:    c.Token != "",
+			Enabled:     c.Enabled,
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleUpsertConnection creates or updates a connection. Body is a Connection
-// JSON ({id, cluster, url, token?, enabled?}). Omitted fields fall back to the
-// existing row's values (so the redacted list can be round-tripped without
-// re-sending the token), and a NEW connection defaults to enabled. `token` and
-// `enabled` are decoded as pointers so "omitted" is distinguishable from
-// "explicitly empty/false".
+// handleUpsertConnection creates or updates a backend or virtual connection.
+// Omitted fields fall back to the existing row's values (so the redacted list
+// can be round-tripped without re-sending the token), and a NEW connection
+// defaults to enabled. `token` and `enabled` are decoded as pointers so
+// "omitted" is distinguishable from "explicitly empty/false".
 func (g *Gateway) handleUpsertConnection(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		ID      string  `json:"id"`
-		Cluster string  `json:"cluster"`
-		URL     string  `json:"url"`
-		Token   *string `json:"token"`
-		Enabled *bool   `json:"enabled"`
+		ID          string            `json:"id"`
+		Kind        string            `json:"kind"`
+		Cluster     string            `json:"cluster"`
+		DisplayName string            `json:"display_name"`
+		Region      string            `json:"region"`
+		Environment string            `json:"environment"`
+		Labels      map[string]string `json:"labels"`
+		URL         string            `json:"url"`
+		Token       *string           `json:"token"`
+		Enabled     *bool             `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -688,13 +1036,37 @@ func (g *Gateway) handleUpsertConnection(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	c := Connection{ID: in.ID, Cluster: in.Cluster, URL: in.URL}
+	c := Connection{
+		ID:          in.ID,
+		Kind:        in.Kind,
+		Cluster:     in.Cluster,
+		DisplayName: in.DisplayName,
+		Region:      in.Region,
+		Environment: in.Environment,
+		Labels:      in.Labels,
+		URL:         in.URL,
+	}
 	if existing != nil {
+		if c.Kind == "" {
+			c.Kind = existing.Kind
+		}
 		if c.Cluster == "" {
 			c.Cluster = existing.Cluster
 		}
 		if c.URL == "" {
 			c.URL = existing.URL
+		}
+		if c.DisplayName == "" {
+			c.DisplayName = existing.DisplayName
+		}
+		if c.Region == "" {
+			c.Region = existing.Region
+		}
+		if c.Environment == "" {
+			c.Environment = existing.Environment
+		}
+		if c.Labels == nil {
+			c.Labels = existing.Labels
 		}
 	}
 	switch {

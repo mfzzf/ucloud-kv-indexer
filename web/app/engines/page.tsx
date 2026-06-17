@@ -232,15 +232,25 @@ export default function EnginesPage() {
 }
 
 type ConnectionDraft = {
+  kind: "backend" | "virtual";
   id: string;
   cluster: string;
+  display_name: string;
   url: string;
   token: string;
   enabled: boolean;
 };
 
 function emptyConnectionDraft(): ConnectionDraft {
-  return { id: "", cluster: "", url: "", token: "", enabled: true };
+  return {
+    kind: "backend",
+    id: "",
+    cluster: "",
+    display_name: "",
+    url: "",
+    token: "",
+    enabled: true,
+  };
 }
 
 function IndexerConnectionsPanel({
@@ -300,8 +310,10 @@ function IndexerConnectionsPanel({
     mutationFn: (c: IndexerConnection) =>
       api.post("/admin/connections", {
         id: c.id,
+        kind: c.kind || "backend",
         cluster: c.cluster,
-        url: c.url,
+        display_name: c.display_name,
+        url: c.kind === "virtual" ? undefined : c.url,
         enabled: !c.enabled,
       }),
     onSuccess: refreshRegistry,
@@ -328,7 +340,9 @@ function IndexerConnectionsPanel({
       }
       return {
         connection: c,
-        message: t("indexers.health.ok_detail", { url: backend.url }),
+        message: backend.virtual
+          ? t("indexers.health.virtual_detail")
+          : t("indexers.health.ok_detail", { url: backend.url }),
       };
     },
     onSuccess: ({ connection, message }) => {
@@ -367,8 +381,10 @@ function IndexerConnectionsPanel({
   const openEdit = (c: IndexerConnection) => {
     setEditing(c);
     setForm({
+      kind: c.kind || "backend",
       id: c.id,
       cluster: c.cluster,
+      display_name: c.display_name ?? "",
       url: c.url,
       token: "",
       enabled: c.enabled,
@@ -385,13 +401,19 @@ function IndexerConnectionsPanel({
   const submit = () => {
     setErr("");
     const body: Record<string, unknown> = {
+      kind: form.kind,
       id: form.id.trim(),
       cluster: form.cluster.trim(),
-      url: form.url.trim(),
       enabled: form.enabled,
     };
-    const token = form.token.trim();
-    if (token) body.token = token;
+    if (form.kind === "virtual") {
+      const displayName = form.display_name.trim();
+      if (displayName) body.display_name = displayName;
+    } else {
+      body.url = form.url.trim();
+      const token = form.token.trim();
+      if (token) body.token = token;
+    }
     upsert.mutate(body);
   };
 
@@ -420,6 +442,25 @@ function IndexerConnectionsPanel({
                 <SheetDescription>{t("indexers.sheet.desc")}</SheetDescription>
               </SheetHeader>
               <div className="grid gap-4 overflow-y-auto px-6 pb-6 sm:grid-cols-2">
+                <Field label={t("indexers.field.kind")}>
+                  <Select
+                    value={form.kind}
+                    onValueChange={(v) => set("kind")(v as ConnectionDraft["kind"])}
+                    disabled={!!editing}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="backend">
+                        {t("indexers.kind.backend")}
+                      </SelectItem>
+                      <SelectItem value="virtual">
+                        {t("indexers.kind.virtual")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
                 <Field label={t("indexers.field.id")}>
                   <Input
                     value={form.id}
@@ -435,24 +476,36 @@ function IndexerConnectionsPanel({
                     placeholder="hkg-vllm"
                   />
                 </Field>
-                <Field label={t("indexers.field.url")}>
-                  <Input
-                    value={form.url}
-                    onChange={(e) => set("url")(e.target.value)}
-                    placeholder="http://10.0.0.12:8090"
-                  />
-                </Field>
-                <Field label={t("indexers.field.token")}>
-                  <Input
-                    value={form.token}
-                    onChange={(e) => set("token")(e.target.value)}
-                    placeholder={
-                      editing && editing.has_token
-                        ? t("indexers.field.token_keep")
-                        : t("indexers.field.token_optional")
-                    }
-                  />
-                </Field>
+                {form.kind === "virtual" ? (
+                  <Field label={t("indexers.field.display_name")}>
+                    <Input
+                      value={form.display_name}
+                      onChange={(e) => set("display_name")(e.target.value)}
+                      placeholder={t("indexers.field.display_name_ph")}
+                    />
+                  </Field>
+                ) : (
+                  <>
+                    <Field label={t("indexers.field.url")}>
+                      <Input
+                        value={form.url}
+                        onChange={(e) => set("url")(e.target.value)}
+                        placeholder="http://10.0.0.12:8090"
+                      />
+                    </Field>
+                    <Field label={t("indexers.field.token")}>
+                      <Input
+                        value={form.token}
+                        onChange={(e) => set("token")(e.target.value)}
+                        placeholder={
+                          editing && editing.has_token
+                            ? t("indexers.field.token_keep")
+                            : t("indexers.field.token_optional")
+                        }
+                      />
+                    </Field>
+                  </>
+                )}
                 <div className="flex items-center justify-between rounded-md border px-3 py-2 sm:col-span-2">
                   <div className="space-y-0.5">
                     <Label>{t("indexers.field.enabled")}</Label>
@@ -480,7 +533,7 @@ function IndexerConnectionsPanel({
                       upsert.isPending ||
                       !form.id.trim() ||
                       !form.cluster.trim() ||
-                      !form.url.trim()
+                      (form.kind === "backend" && !form.url.trim())
                     }
                   >
                     {t("common.save")}
@@ -518,8 +571,19 @@ function IndexerConnectionsPanel({
                   <TableCell className="pl-6 font-mono text-xs">
                     {c.id}
                   </TableCell>
-                  <TableCell>{c.cluster}</TableCell>
-                  <TableCell className="font-mono text-xs">{c.url}</TableCell>
+                  <TableCell>
+                    <div className="flex flex-col gap-1">
+                      <span>{c.cluster}</span>
+                      <Badge variant={c.kind === "virtual" ? "warning" : "outline"}>
+                        {c.kind === "virtual"
+                          ? t("indexers.kind.virtual")
+                          : t("indexers.kind.backend")}
+                      </Badge>
+                    </div>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {c.kind === "virtual" ? "—" : c.url}
+                  </TableCell>
                   <TableCell>
                     <Badge variant={c.has_token ? "secondary" : "outline"}>
                       {c.has_token
@@ -633,7 +697,7 @@ function RegisterForm({
   const backends = React.useMemo(() => {
     if (registryAvailable) {
       return connections
-        .filter((c) => c.enabled)
+        .filter((c) => c.enabled && (c.kind || "backend") === "backend")
         .map((c) => ({ id: c.id, cluster: c.cluster, url: c.url }));
     }
     return clusterInfos.flatMap((c) =>

@@ -108,14 +108,14 @@ func spec(title string, gateway bool) map[string]any {
 
 	if gateway {
 		paths["/clusters-health"] = map[string]any{
-			"get": op([]string{"Gateway"}, "Cluster backend health", "Groups configured backend connections by cluster and live-probes each backend.", nil, nil),
+			"get": op([]string{"Gateway"}, "Cluster indexer health", "Groups configured backend and virtual indexer connections by cluster. Backend connections are live-probed; virtual connections are reported as healthy control-plane targets.", nil, nil),
 		}
 		paths["/admin/connections"] = map[string]any{
-			"get":  op([]string{"Gateway"}, "List backend connections", "Lists gateway backend connections. Tokens are redacted.", nil, nil),
-			"post": op([]string{"Gateway"}, "Create or update backend connection", "Creates or updates a kvindexer backend connection.", jsonBody("Gateway connection", connectionSchema()), nil),
+			"get":  op([]string{"Gateway"}, "List indexer connections", "Lists gateway backend and virtual indexer connections. Tokens are redacted.", nil, nil),
+			"post": op([]string{"Gateway"}, "Create or update indexer connection", "Creates or updates a backend kvindexer connection or a gateway-local virtual indexer connection.", jsonBody("Gateway connection", connectionSchema()), nil),
 		}
 		paths["/admin/connections/{id}"] = map[string]any{
-			"delete": op([]string{"Gateway"}, "Delete backend connection", "Deletes a gateway backend connection.", nil, []any{pathID()}),
+			"delete": op([]string{"Gateway"}, "Delete indexer connection", "Deletes a gateway indexer connection.", nil, []any{pathID()}),
 		}
 	}
 
@@ -386,12 +386,17 @@ func ruleActionSchema() map[string]any {
 }
 
 func connectionSchema() map[string]any {
-	return objectSchema([]string{"id", "cluster", "url"},
-		field("id", "string", "Gateway backend id."),
-		field("cluster", "string", "Cluster this backend serves."),
-		field("url", "string", "Base URL of the kvindexer backend."),
-		field("token", "string", "Optional bearer token used by the gateway when calling this backend."),
+	return objectSchema([]string{"id", "cluster"},
+		field("id", "string", "Gateway connection id."),
+		field("cluster", "string", "Cluster label this connection serves. Virtual connections create gateway-local clusters without a real kvindexer URL."),
+		map[string]any{"name": "kind", "type": "string", "description": "Connection kind. Omitted defaults to backend.", "enum": []string{"backend", "virtual"}},
+		field("url", "string", "Base URL of the kvindexer backend. Required when kind=backend; ignored when kind=virtual."),
+		field("token", "string", "Optional bearer token used by the gateway when calling a backend connection. Ignored when kind=virtual."),
 		field("enabled", "boolean", "Whether this connection is enabled."),
+		field("display_name", "string", "Optional human-readable label for a virtual or backend connection."),
+		field("region", "string", "Optional region metadata."),
+		field("environment", "string", "Optional environment metadata, for example prod or staging."),
+		objectField("labels", "Optional arbitrary metadata labels."),
 	)
 }
 

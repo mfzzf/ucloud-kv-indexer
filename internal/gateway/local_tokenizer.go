@@ -93,10 +93,15 @@ func (g *Gateway) handleAdmission(proto types.Protocol) http.HandlerFunc {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		b, ok := g.selectedOne(w, r)
+		target, ok := g.selectedOneTarget(w, r)
 		if !ok {
 			return
 		}
+		if target.Virtual {
+			g.handleVirtualAdmissionTarget(w, r, target, proto, body)
+			return
+		}
+		b := target.Backend
 
 		model := modelFromBody(body)
 		if model == "" {
@@ -155,16 +160,57 @@ func (g *Gateway) handleAdmission(proto types.Protocol) http.HandlerFunc {
 		version := g.fetchConfigVersionBestEffort(r.Context(), b)
 		resp := g.evaluateLocal(rr, prof, tokenOnlyPolicies(policies), enginesForProfile(engines, rr.Model, prof), tok.Count, version, b.Cluster)
 		g.recordAdmissionDecision(b, rr, resp)
-		target := ""
+		targetEngine := ""
 		if resp.Target != nil {
-			target = resp.Target.EngineID
+			targetEngine = resp.Target.EngineID
 		}
 		log.Printf("gateway: local admission backend=%s cluster=%s path=%s model=%s profile_model=%s config_version=%d tokens=%d decision=%s reason=%s status=%d fallback=%t target=%s matched_rule=%s evaluated_rules=%d",
 			b.ID, b.Cluster, r.URL.Path, rr.Model, prof.ModelID, version, tok.Count,
-			resp.Decision, resp.Reason, resp.HTTPStatus, resp.Fallback, target,
+			resp.Decision, resp.Reason, resp.HTTPStatus, resp.Fallback, targetEngine,
 			resp.Config.MatchedRuleID, len(resp.Config.EvaluatedRuleIDs))
 		writeJSON(w, resp.HTTPStatus, resp)
 	}
+}
+
+func (g *Gateway) handleVirtualAdmissionTarget(w http.ResponseWriter, r *http.Request, target gatewayTarget, proto types.Protocol, body []byte) {
+	model := modelFromBody(body)
+	if model == "" {
+		writeErr(w, http.StatusBadRequest, "model required for virtual cluster admission")
+		return
+	}
+	vc, err := g.store.GetVirtualConfig(r.Context(), target.id())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "virtual config: "+err.Error())
+		return
+	}
+	prof, hasProfile := resolveProfile(snapshotProfiles(vc.Snapshot), model)
+	if !hasProfile {
+		writeErr(w, http.StatusNotFound, fmt.Sprintf("virtual profile not found for model %s", model))
+		return
+	}
+	if prof.TokenizerModeOrDefault() != config.TokenizerModeLocal {
+		writeErr(w, http.StatusBadRequest, "virtual model profiles require tokenizer_mode=local")
+		return
+	}
+	if g.localTokenizerURL == "" {
+		writeErr(w, http.StatusInternalServerError, "gateway local tokenizer url is not configured")
+		return
+	}
+	rr, err := normalizeByProtocol(string(prof.Framework), proto, body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	tok, err := g.tokenizeLocalChat(tctx, target.cluster(), prof, rr)
+	cancel()
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "tokenize: "+err.Error())
+		return
+	}
+	resp := g.evaluateLocal(rr, prof, tokenOnlyPolicies(snapshotPolicies(vc.Snapshot)), nil, tok.Count, vc.Snapshot.Version, target.cluster())
+	g.recordVirtualDecision(target.Connection, rr, resp)
+	writeJSON(w, resp.HTTPStatus, resp)
 }
 
 func (g *Gateway) handleQueryPrefix(w http.ResponseWriter, r *http.Request) {
@@ -173,10 +219,15 @@ func (g *Gateway) handleQueryPrefix(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	b, ok := g.selectedOne(w, r)
+	target, ok := g.selectedOneTarget(w, r)
 	if !ok {
 		return
 	}
+	if target.Virtual {
+		writeErr(w, http.StatusBadRequest, "virtual clusters do not support KV-cache prefix residency")
+		return
+	}
+	b := target.Backend
 	var req queryPrefixRequest
 	if json.Unmarshal(body, &req) == nil && req.Model != "" {
 		prof, hasProfile, err := g.fetchProfile(r.Context(), b, req.Model)
@@ -198,7 +249,7 @@ func (g *Gateway) handleTokenizePreview(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	b, ok := g.selectedOne(w, r)
+	target, ok := g.selectedOneTarget(w, r)
 	if !ok {
 		return
 	}
@@ -207,6 +258,11 @@ func (g *Gateway) handleTokenizePreview(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if target.Virtual {
+		g.handleVirtualTokenizePreview(w, r, target, req)
+		return
+	}
+	b := target.Backend
 	prof, hasProfile, err := g.fetchProfile(r.Context(), b, req.Model)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("backend %s (%s): profiles: %v", b.ID, b.Cluster, err))
@@ -246,13 +302,62 @@ func (g *Gateway) handleTokenizePreview(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (g *Gateway) handleVirtualTokenizePreview(w http.ResponseWriter, r *http.Request, target gatewayTarget, req tokenizePreviewRequest) {
+	if req.Model == "" {
+		writeErr(w, http.StatusBadRequest, "model required for virtual tokenizer preview")
+		return
+	}
+	vc, err := g.store.GetVirtualConfig(r.Context(), target.id())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "virtual config: "+err.Error())
+		return
+	}
+	prof, hasProfile := resolveProfile(snapshotProfiles(vc.Snapshot), req.Model)
+	if !hasProfile {
+		writeErr(w, http.StatusNotFound, fmt.Sprintf("virtual profile not found for model %s", req.Model))
+		return
+	}
+	if prof.TokenizerModeOrDefault() != config.TokenizerModeLocal {
+		writeErr(w, http.StatusBadRequest, "virtual model profiles require tokenizer_mode=local")
+		return
+	}
+	if g.localTokenizerURL == "" {
+		writeErr(w, http.StatusInternalServerError, "gateway local tokenizer url is not configured")
+		return
+	}
+	rr, err := normalizeByProtocol(string(prof.Framework), types.Protocol(req.Protocol), req.Raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	tok, err := g.tokenizeLocalChat(tctx, target.cluster(), prof, rr)
+	cancel()
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "tokenize: "+err.Error())
+		return
+	}
+	blockSize := prof.BlockSize
+	if blockSize <= 0 {
+		blockSize = 16
+	}
+	writeJSON(w, http.StatusOK, tokenizePreviewResponse{
+		Model:       prof.ModelID,
+		Namespace:   prof.Namespace(),
+		BlockSize:   blockSize,
+		Count:       tok.Count,
+		Tokens:      tok.Tokens,
+		RequestKeys: []uint64{},
+	})
+}
+
 func (g *Gateway) handleModelProfileUpsert(w http.ResponseWriter, r *http.Request) {
 	body, err := readRawBody(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	b, ok := g.selectedOne(w, r)
+	target, ok := g.selectedOneTarget(w, r)
 	if !ok {
 		return
 	}
@@ -264,6 +369,10 @@ func (g *Gateway) handleModelProfileUpsert(w http.ResponseWriter, r *http.Reques
 	}
 	if prof.ModelID == "" {
 		writeErr(w, http.StatusBadRequest, "model_id required")
+		return
+	}
+	if target.Virtual && prof.TokenizerModeOrDefault() != config.TokenizerModeLocal {
+		writeErr(w, http.StatusBadRequest, "virtual model profiles require tokenizer_mode=local")
 		return
 	}
 
@@ -278,7 +387,7 @@ func (g *Gateway) handleModelProfileUpsert(w http.ResponseWriter, r *http.Reques
 		}
 		var existing TokenizerAsset
 		hasExisting := false
-		if asset, err := g.store.GetTokenizerAsset(r.Context(), b.Cluster, prof.ModelID); err == nil {
+		if asset, err := g.store.GetTokenizerAsset(r.Context(), target.cluster(), prof.ModelID); err == nil {
 			existing = asset
 			hasExisting = true
 		} else if !errors.Is(err, ErrTokenizerAssetNotFound) {
@@ -309,7 +418,7 @@ func (g *Gateway) handleModelProfileUpsert(w http.ResponseWriter, r *http.Reques
 		prof.TokenizerMode = config.TokenizerModeLocal
 		prof.ChatTemplateSHA256 = reg.ChatTemplateSHA256
 		asset, err := g.store.PutTokenizerAsset(r.Context(), TokenizerAssetInput{
-			Cluster:            b.Cluster,
+			Cluster:            target.cluster(),
 			ModelID:            prof.ModelID,
 			TokenizerZip:       zipBytes,
 			TokenizerZipName:   zipName,
@@ -320,10 +429,20 @@ func (g *Gateway) handleModelProfileUpsert(w http.ResponseWriter, r *http.Reques
 			writeErr(w, http.StatusBadGateway, "store tokenizer asset: "+err.Error())
 			return
 		}
-		g.markLocalTokenizerLoaded(b.Cluster, prof.ModelID, localStateFromAsset(asset))
+		g.markLocalTokenizerLoaded(target.cluster(), prof.ModelID, localStateFromAsset(asset))
 	} else {
 		prof.TokenizerMode = config.TokenizerModeRemote
 		prof.ChatTemplateSHA256 = ""
+	}
+
+	if target.Virtual {
+		stored, err := g.store.UpsertVirtualModelProfile(r.Context(), target.id(), prof)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "store virtual model profile: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, stored)
+		return
 	}
 
 	out, err := json.Marshal(prof)
@@ -417,6 +536,52 @@ func (g *Gateway) recordAdmissionDecision(b Backend, rr *types.RouteRequest, res
 		rec.TargetEngine = resp.Target.EngineID
 	}
 	g.recordLocalDecision(rec)
+}
+
+func (g *Gateway) recordVirtualDecision(c Connection, rr *types.RouteRequest, resp routeResponse) {
+	tenant := rr.TenantID
+	if tenant == "" {
+		tenant = "default"
+	}
+	rec := localDecisionRecord{
+		Timestamp:   g.now(),
+		Protocol:    rr.Protocol,
+		Model:       rr.Model,
+		TenantID:    tenant,
+		Decision:    resp.Decision,
+		Reason:      resp.Reason,
+		HTTPStatus:  resp.HTTPStatus,
+		InputTokens: resp.Cache.InputTokens,
+		HitRatio:    resp.Cache.HitRatio,
+		BestHit:     resp.Cache.BestHitTokens,
+		Fallback:    resp.Fallback,
+		ConfigVer:   resp.Config.ConfigVersion,
+		Namespace:   resp.Config.Namespace,
+		Cluster:     c.Cluster,
+		Backend:     c.ID,
+		Source:      "gateway_virtual_tokenizer",
+	}
+	g.recordLocalDecision(rec)
+}
+
+func snapshotProfiles(snap config.Snapshot) []config.ModelProfile {
+	out := make([]config.ModelProfile, 0, len(snap.Profiles))
+	for _, p := range snap.Profiles {
+		if p != nil {
+			out = append(out, *p)
+		}
+	}
+	return out
+}
+
+func snapshotPolicies(snap config.Snapshot) []config.Policy {
+	out := make([]config.Policy, 0, len(snap.Policies))
+	for _, p := range snap.Policies {
+		if p != nil {
+			out = append(out, *p)
+		}
+	}
+	return out
 }
 
 func (g *Gateway) selectedOne(w http.ResponseWriter, r *http.Request) (Backend, bool) {

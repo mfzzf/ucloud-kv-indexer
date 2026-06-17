@@ -66,7 +66,7 @@
   "paths": {
     "/admin/connections": {
       "get": {
-        "description": "Lists gateway backend connections. Tokens are redacted.",
+        "description": "Lists gateway backend and virtual indexer connections. Tokens are redacted.",
         "responses": {
           "200": {
             "content": {
@@ -89,43 +89,67 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "List backend connections",
+        "summary": "List indexer connections",
         "tags": [
           "Gateway"
         ]
       },
       "post": {
-        "description": "Creates or updates a kvindexer backend connection.",
+        "description": "Creates or updates a backend kvindexer connection or a gateway-local virtual indexer connection.",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "properties": {
                   "cluster": {
-                    "description": "Cluster this backend serves.",
+                    "description": "Cluster label this connection serves. Virtual connections create gateway-local clusters without a real kvindexer URL.",
+                    "type": "string"
+                  },
+                  "display_name": {
+                    "description": "Optional human-readable label for a virtual or backend connection.",
                     "type": "string"
                   },
                   "enabled": {
                     "description": "Whether this connection is enabled.",
                     "type": "boolean"
                   },
+                  "environment": {
+                    "description": "Optional environment metadata, for example prod or staging.",
+                    "type": "string"
+                  },
                   "id": {
-                    "description": "Gateway backend id.",
+                    "description": "Gateway connection id.",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "description": "Connection kind. Omitted defaults to backend.",
+                    "enum": [
+                      "backend",
+                      "virtual"
+                    ],
+                    "type": "string"
+                  },
+                  "labels": {
+                    "additionalProperties": true,
+                    "description": "Optional arbitrary metadata labels.",
+                    "type": "object"
+                  },
+                  "region": {
+                    "description": "Optional region metadata.",
                     "type": "string"
                   },
                   "token": {
-                    "description": "Optional bearer token used by the gateway when calling this backend.",
+                    "description": "Optional bearer token used by the gateway when calling a backend connection. Ignored when kind=virtual.",
                     "type": "string"
                   },
                   "url": {
-                    "description": "Base URL of the kvindexer backend.",
+                    "description": "Base URL of the kvindexer backend. Required when kind=backend; ignored when kind=virtual.",
                     "type": "string"
                   }
                 },
                 "required": [
                   "id",
-                  "cluster",
-                  "url"
+                  "cluster"
                 ],
                 "type": "object"
               }
@@ -156,7 +180,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Create or update backend connection",
+        "summary": "Create or update indexer connection",
         "tags": [
           "Gateway"
         ]
@@ -164,7 +188,7 @@
     },
     "/admin/connections/{id}": {
       "delete": {
-        "description": "Deletes a gateway backend connection.",
+        "description": "Deletes a gateway indexer connection.",
         "parameters": [
           {
             "description": "Resource identifier.",
@@ -198,7 +222,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Delete backend connection",
+        "summary": "Delete indexer connection",
         "tags": [
           "Gateway"
         ]
@@ -327,7 +351,7 @@
     },
     "/clusters-health": {
       "get": {
-        "description": "Groups configured backend connections by cluster and live-probes each backend.",
+        "description": "Groups configured backend and virtual indexer connections by cluster. Backend connections are live-probed; virtual connections are reported as healthy control-plane targets.",
         "responses": {
           "200": {
             "content": {
@@ -350,7 +374,7 @@
             "$ref": "#/components/responses/Error"
           }
         },
-        "summary": "Cluster backend health",
+        "summary": "Cluster indexer health",
         "tags": [
           "Gateway"
         ]

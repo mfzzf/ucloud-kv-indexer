@@ -51,6 +51,7 @@ export interface BackendHealth {
   url: string;
   healthy: boolean;
   error?: string;
+  virtual?: boolean;
 }
 
 export interface ClusterInfo {
@@ -58,9 +59,16 @@ export interface ClusterInfo {
   backends: BackendHealth[];
 }
 
+export type IndexerKind = "backend" | "virtual";
+
 export interface IndexerConnection {
   id: string;
+  kind?: IndexerKind;
   cluster: string;
+  display_name?: string;
+  region?: string;
+  environment?: string;
+  labels?: Record<string, string>;
   url: string;
   has_token: boolean;
   enabled: boolean;
@@ -78,6 +86,7 @@ export interface Cluster {
   labels?: Record<string, string>;
   _cluster?: string;
   _backend?: string;
+  _virtual?: boolean;
 }
 
 export interface Engine {
@@ -100,6 +109,7 @@ export interface Engine {
   labels?: Record<string, string>;
   _cluster?: string;
   _backend?: string;
+  _virtual?: boolean;
 }
 
 export interface ModelProfile {
@@ -119,6 +129,7 @@ export interface ModelProfile {
   supports_cache_salt: boolean;
   _cluster?: string;
   _backend?: string;
+  _virtual?: boolean;
 }
 
 export interface RuleCondition {
