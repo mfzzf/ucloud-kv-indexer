@@ -385,6 +385,30 @@ func TestVirtualConnectionHealthAndModelProfiles(t *testing.T) {
 	if len(profiles) != 0 {
 		t.Fatalf("virtual profile delete left rows: %+v", profiles)
 	}
+
+	_, err = store.PutTokenizerAsset(t.Context(), TokenizerAssetInput{
+		Cluster:      "local-tokenizer",
+		ModelID:      "glm-5.1",
+		TokenizerZip: []byte("zip-bytes"),
+	})
+	if err != nil {
+		t.Fatalf("put ordinary tokenizer asset: %v", err)
+	}
+	code, body = doJSON(t, h, http.MethodPost, "/model-profiles?backend=virt-0", `{
+		"model_id":"glm-5.1",
+		"framework":"vllm",
+		"tokenizer_mode":"local",
+		"hash_profile":"vllm-v1-text",
+		"block_size":16,
+		"hash_seed":"0"
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("ordinary virtual profile status %d body %s", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodDelete, "/model-profiles/glm-5.1?backend=virt-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("delete ordinary virtual profile status %d body %s", code, body)
+	}
 }
 
 func TestVirtualPolicyPatchAndDelete(t *testing.T) {

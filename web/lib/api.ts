@@ -15,14 +15,31 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
   });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  const data = parseJSON(text);
   if (!res.ok) {
-    const msg =
-      (data && data.error && (data.error.message || data.error.type)) ||
-      `HTTP ${res.status}`;
+    const error = responseError(data);
+    const msg = error || (text ? `HTTP ${res.status}: ${text}` : `HTTP ${res.status}`);
     throw new Error(msg);
   }
+  if (data === undefined) {
+    throw new Error(`Invalid JSON response: ${text}`);
+  }
   return data as T;
+}
+
+function parseJSON(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function responseError(data: unknown): string {
+  if (!data || typeof data !== "object" || !("error" in data)) return "";
+  const error = (data as { error?: { message?: string; type?: string } }).error;
+  return error?.message || error?.type || "";
 }
 
 export const api = {
