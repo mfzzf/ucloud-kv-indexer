@@ -992,6 +992,48 @@
         ]
       }
     },
+    "/model-profiles/{id}": {
+      "delete": {
+        "description": "Deletes a model profile from the selected backend or virtual indexer.",
+        "parameters": [
+          {
+            "description": "Resource identifier.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete model profile",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
     "/openapi.json": {
       "get": {
         "description": "Returns this OpenAPI 3 document.",

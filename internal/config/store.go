@@ -262,6 +262,18 @@ func (s *Store) ListModelProfiles() []ModelProfile {
 	return out
 }
 
+func (s *Store) RemoveModelProfile(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.profiles[id]; !ok {
+		return false
+	}
+	delete(s.profiles, id)
+	s.bump(AuditEntry{Action: "remove", Entity: "model_profile", EntityID: id})
+	s.persistLocked()
+	return true
+}
+
 // ResolveProfile finds a profile by model_id or alias.
 func (s *Store) ResolveProfile(model string) (ModelProfile, bool) {
 	s.mu.RLock()

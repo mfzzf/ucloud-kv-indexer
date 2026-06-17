@@ -204,6 +204,15 @@ func (s *Service) handleCreateModelProfileMultipart(w http.ResponseWriter, r *ht
 	writeJSON(w, http.StatusOK, stored)
 }
 
+func (s *Service) handleDeleteModelProfile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.Store.RemoveModelProfile(id) {
+		writeErr(w, http.StatusNotFound, "model profile not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config_version": s.Store.Version()})
+}
+
 func formValue(form *multipart.Form, key string) string {
 	if form == nil || len(form.Value[key]) == 0 {
 		return ""

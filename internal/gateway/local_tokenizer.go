@@ -375,6 +375,16 @@ func (g *Gateway) handleModelProfileUpsert(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "virtual model profiles require tokenizer_mode=local")
 		return
 	}
+	if prof.TokenizerModeOrDefault() == config.TokenizerModeLocal {
+		log.Printf(
+			"gateway local tokenizer upload cluster=%s model=%s tokenizer_zip_bytes=%d chat_template_bytes=%d zip_name=%q",
+			target.cluster(),
+			prof.ModelID,
+			len(zipBytes),
+			len([]byte(chatTemplate)),
+			zipName,
+		)
+	}
 
 	if prof.TokenizerModeOrDefault() == config.TokenizerModeLocal {
 		if g.localTokenizerURL == "" {
@@ -404,6 +414,35 @@ func (g *Gateway) handleModelProfileUpsert(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			zipBytes = buf.Bytes()
+		}
+		if len(zipBytes) == 0 {
+			sourceBackendID := strings.TrimSpace(r.URL.Query().Get("source_backend"))
+			if sourceBackendID != "" {
+				sourceTarget, ok := g.targetByBackendID(sourceBackendID)
+				if !ok {
+					writeErr(w, http.StatusBadRequest, fmt.Sprintf("source_backend %q not found", sourceBackendID))
+					return
+				}
+				if sourceTarget.cluster() != target.cluster() {
+					sourceAsset, err := g.store.GetTokenizerAsset(r.Context(), sourceTarget.cluster(), prof.ModelID)
+					if err == nil {
+						if chatTemplate == "" {
+							chatTemplate = sourceAsset.ChatTemplate
+						}
+						if !sourceAsset.ZipFileID.IsZero() {
+							var buf bytes.Buffer
+							if err := g.store.ReadTokenizerZip(r.Context(), sourceAsset, &buf); err != nil {
+								writeErr(w, http.StatusBadGateway, "read source tokenizer asset: "+err.Error())
+								return
+							}
+							zipBytes = buf.Bytes()
+						}
+					} else if !errors.Is(err, ErrTokenizerAssetNotFound) {
+						writeErr(w, http.StatusBadGateway, "get source tokenizer asset: "+err.Error())
+						return
+					}
+				}
+			}
 		}
 		if len(zipBytes) == 0 {
 			writeErr(w, http.StatusBadRequest, "local tokenizer profile requires tokenizer_zip on first upload")
@@ -1019,6 +1058,9 @@ func firstFileBytes(form *multipart.Form, key string) ([]byte, string, error) {
 	}
 	if int64(len(b)) > maxGatewayBodyBytes {
 		return nil, "", fmt.Errorf("%s exceeds %d bytes", key, maxGatewayBodyBytes)
+	}
+	if len(b) == 0 {
+		return nil, "", fmt.Errorf("%s upload %q is empty", key, fh.Filename)
 	}
 	return b, fh.Filename, nil
 }

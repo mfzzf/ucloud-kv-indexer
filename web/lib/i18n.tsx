@@ -244,7 +244,7 @@ const en: Dict = {
   "profiles.field.block_hint": "qwen3.5-4b full_attention group = 528",
   "profiles.field.tokenizer": "Tokenizer endpoint",
   "profiles.field.tokenizer_ph": "inherit from engine",
-  "profiles.field.target_backend": "Target indexer",
+  "profiles.field.target_backend": "Target indexer / cluster",
   "profiles.field.tokenizer_mode": "Tokenizer source",
   "profiles.tokenizer_mode.remote": "Remote engine",
   "profiles.tokenizer_mode.local": "Local sidecar",
@@ -261,6 +261,7 @@ const en: Dict = {
   "profiles.bump.desc":
     "This change affects tokenization or hashing. A fresh request-key namespace will be allocated; old residency will TTL out, not corrupt new queries.",
   "profiles.btn.save_new": "Save as new version",
+  "profiles.btn.move": "Save and move",
 
   // policies
   "policies.title": "Admission Policies",
@@ -786,7 +787,7 @@ const zh: Dict = {
   "profiles.field.block_hint": "qwen3.5-4b full_attention 组 = 528",
   "profiles.field.tokenizer": "分词器端点",
   "profiles.field.tokenizer_ph": "继承自引擎",
-  "profiles.field.target_backend": "目标 Indexer",
+  "profiles.field.target_backend": "目标 Indexer / Cluster",
   "profiles.field.tokenizer_mode": "分词来源",
   "profiles.tokenizer_mode.remote": "远端引擎",
   "profiles.tokenizer_mode.local": "本地 sidecar",
@@ -803,6 +804,7 @@ const zh: Dict = {
   "profiles.bump.desc":
     "本次修改会影响分词或哈希规则，将分配新的 request_key 命名空间；旧缓存驻留会按 TTL 失效，不会污染新查询。",
   "profiles.btn.save_new": "另存为新版本",
+  "profiles.btn.move": "保存并移动",
 
   // policies
   "policies.title": "准入与命中策略",

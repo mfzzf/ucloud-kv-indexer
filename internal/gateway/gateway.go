@@ -28,6 +28,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -175,6 +176,20 @@ func (t gatewayTarget) cluster() string {
 		return t.Connection.Cluster
 	}
 	return t.Backend.Cluster
+}
+
+func (g *Gateway) targetByBackendID(id string) (gatewayTarget, bool) {
+	for _, b := range g.backends() {
+		if b.ID == id {
+			return gatewayTarget{Backend: b}, true
+		}
+	}
+	for _, c := range g.virtualConnections() {
+		if c.ID == id {
+			return gatewayTarget{Connection: c, Virtual: true}, true
+		}
+	}
+	return gatewayTarget{}, false
 }
 
 func (g *Gateway) selectedTargets(r *http.Request) []gatewayTarget {
@@ -677,6 +692,27 @@ func evaluateEffectivePolicyPreview(req effectivePolicyPreviewRequest, rules []c
 	})
 }
 
+func (g *Gateway) handleModelProfileDelete(w http.ResponseWriter, r *http.Request) {
+	target, ok := g.selectedOneTarget(w, r)
+	if !ok {
+		return
+	}
+	if !target.Virtual {
+		g.proxyOne(w, r)
+		return
+	}
+	ok, err := g.store.RemoveVirtualModelProfile(r.Context(), target.id(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "delete virtual model profile: "+err.Error())
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "model profile not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (g *Gateway) handlePolicyUpsert(w http.ResponseWriter, r *http.Request) {
 	body, err := readRawBody(r)
 	if err != nil {
@@ -941,6 +977,7 @@ func (g *Gateway) ginRouter() *gin.Engine {
 	r.POST("/engines/unregister", httpHandler(g.proxyOne))
 	r.PATCH("/engines/:id", httpHandler(g.proxyOne, "id"))
 	r.POST("/model-profiles", httpHandler(g.handleModelProfileUpsert))
+	r.DELETE("/model-profiles/*id", httpHandler(g.handleModelProfileDelete, "id"))
 	r.POST("/policies", httpHandler(g.handlePolicyUpsert))
 	r.PATCH("/policies/:id", httpHandler(g.handlePolicyPatch, "id"))
 	r.DELETE("/policies/:id", httpHandler(g.handlePolicyDelete, "id"))
@@ -960,7 +997,7 @@ func (g *Gateway) ginRouter() *gin.Engine {
 func httpHandler(h http.HandlerFunc, pathParams ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		for _, name := range pathParams {
-			c.Request.SetPathValue(name, c.Param(name))
+			c.Request.SetPathValue(name, strings.TrimPrefix(c.Param(name), "/"))
 		}
 		h(c.Writer, c.Request)
 	}

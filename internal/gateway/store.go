@@ -109,6 +109,7 @@ type Store interface {
 	ListVirtualConfigs(context.Context) ([]VirtualConfig, error)
 	GetVirtualConfig(context.Context, string) (VirtualConfig, error)
 	UpsertVirtualModelProfile(context.Context, string, config.ModelProfile) (config.ModelProfile, error)
+	RemoveVirtualModelProfile(context.Context, string, string) (bool, error)
 	UpsertVirtualPolicy(context.Context, string, config.Policy) (config.Policy, error)
 	PatchVirtualPolicy(context.Context, string, string, config.Policy) (bool, error)
 	RemoveVirtualPolicy(context.Context, string, string) (bool, error)
@@ -476,6 +477,26 @@ func (s *ConnStore) UpsertVirtualModelProfile(parent context.Context, backendID 
 	return stored, nil
 }
 
+func (s *ConnStore) RemoveVirtualModelProfile(parent context.Context, backendID, modelID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(parent, s.timeout)
+	defer cancel()
+	vc, err := s.getVirtualConfig(ctx, backendID)
+	if err != nil {
+		return false, err
+	}
+	st, p := virtualStoreFromSnapshot(vc.Snapshot)
+	ok := st.RemoveModelProfile(modelID)
+	if !ok {
+		return false, nil
+	}
+	vc.Snapshot = p.snap
+	vc.UpdatedAt = time.Now()
+	if err := s.putVirtualConfig(ctx, vc); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *ConnStore) UpsertVirtualPolicy(parent context.Context, backendID string, policy config.Policy) (config.Policy, error) {
 	ctx, cancel := context.WithTimeout(parent, s.timeout)
 	defer cancel()
@@ -722,6 +743,24 @@ func (s *MemoryStore) UpsertVirtualModelProfile(_ context.Context, backendID str
 	vc.UpdatedAt = time.Now()
 	s.virtualByID[backendID] = vc
 	return stored, nil
+}
+
+func (s *MemoryStore) RemoveVirtualModelProfile(_ context.Context, backendID, modelID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	vc, ok := s.virtualByID[backendID]
+	if !ok {
+		return false, ErrVirtualConfigNotFound
+	}
+	st, p := virtualStoreFromSnapshot(vc.Snapshot)
+	ok = st.RemoveModelProfile(modelID)
+	if !ok {
+		return false, nil
+	}
+	vc.Snapshot = p.snap
+	vc.UpdatedAt = time.Now()
+	s.virtualByID[backendID] = vc
+	return true, nil
 }
 
 func (s *MemoryStore) UpsertVirtualPolicy(_ context.Context, backendID string, policy config.Policy) (config.Policy, error) {

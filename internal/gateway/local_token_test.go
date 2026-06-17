@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -312,5 +313,84 @@ func TestGatewayVirtualLocalTokenizerAdmission(t *testing.T) {
 		if rec["source"] != "gateway_virtual_tokenizer" || rec["_cluster"] != "local-tokenizer" || rec["_backend"] != "virt-0" {
 			t.Fatalf("virtual decision missing tags/source: %v", rec)
 		}
+	}
+}
+
+func TestGatewayCopiesLocalTokenizerAssetWhenMovingProfile(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/models":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"model_id":      "glm-5.1",
+				"tokenizer_dir": "/tokenizers/glm-5.1",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/models":
+			var req struct {
+				ModelID      string `json:"model_id"`
+				ChatTemplate string `json:"chat_template"`
+			}
+			if err := r.ParseMultipartForm(16 << 20); err != nil {
+				writeErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			req.ModelID = r.FormValue("model_id")
+			req.ChatTemplate = r.FormValue("chat_template")
+			writeJSON(w, http.StatusOK, map[string]any{
+				"model_id":             req.ModelID,
+				"tokenizer_dir":        "/tokenizers/" + req.ModelID,
+				"zip_sha256":           "zip-sha",
+				"chat_template_sha256": "template-sha",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer local.Close()
+
+	store := NewMemoryStore()
+	if _, err := store.SeedIfEmpty([]Connection{
+		{ID: "src", Kind: ConnectionKindVirtual, Cluster: "th-gb200", Enabled: true},
+		{ID: "dest", Kind: ConnectionKindVirtual, Cluster: "h200", Enabled: true},
+	}); err != nil {
+		t.Fatalf("seed connections: %v", err)
+	}
+	if _, err := store.PutTokenizerAsset(t.Context(), TokenizerAssetInput{
+		Cluster:      "th-gb200",
+		ModelID:      "glm-5.1",
+		TokenizerZip: []byte("zip-bytes"),
+		ChatTemplate: "{% for message in messages %}{{ message.content }}{% endfor %}",
+	}); err != nil {
+		t.Fatalf("put source tokenizer asset: %v", err)
+	}
+
+	g := NewWithStore(store, time.Now)
+	g.SetLocalTokenizerURL(local.URL)
+	h := g.Router()
+
+	code, body := doJSON(t, h, http.MethodPost, "/model-profiles?backend=dest&source_backend=src", `{
+		"model_id":"glm-5.1",
+		"framework":"vllm",
+		"tokenizer_mode":"local",
+		"hash_profile":"vllm-v1-text",
+		"block_size":16,
+		"hash_seed":"0"
+	}`)
+	if code != http.StatusOK {
+		t.Fatalf("move profile should copy source tokenizer asset status=%d body=%s", code, body)
+	}
+
+	asset, err := store.GetTokenizerAsset(t.Context(), "h200", "glm-5.1")
+	if err != nil {
+		t.Fatalf("get copied tokenizer asset: %v", err)
+	}
+	var copied bytes.Buffer
+	if err := store.ReadTokenizerZip(t.Context(), asset, &copied); err != nil {
+		t.Fatalf("read copied tokenizer zip: %v", err)
+	}
+	if copied.String() != "zip-bytes" {
+		t.Fatalf("copied tokenizer zip = %q, want zip-bytes", copied.String())
+	}
+	if asset.ChatTemplate == "" {
+		t.Fatal("copied tokenizer asset should keep chat template")
 	}
 }

@@ -17,8 +17,11 @@ func GatewaySpec() map[string]any {
 
 func spec(title string, gateway bool) map[string]any {
 	selectorParams := []any{}
+	modelProfilePostParams := selectorParams
 	if gateway {
 		selectorParams = []any{ref("#/components/parameters/Cluster"), ref("#/components/parameters/Backend")}
+		modelProfilePostParams = append([]any{}, selectorParams...)
+		modelProfilePostParams = append(modelProfilePostParams, ref("#/components/parameters/SourceBackend"))
 	}
 
 	paths := map[string]any{
@@ -72,7 +75,10 @@ func spec(title string, gateway bool) map[string]any {
 		},
 		"/model-profiles": map[string]any{
 			"get":  op([]string{"Config"}, "List model profiles", "Lists tokenization/hash profiles.", nil, selectorParams),
-			"post": op([]string{"Config"}, "Create or update model profile", "Creates a new profile version when hash-affecting fields change.", jsonBody("Model profile", modelProfileSchema()), selectorParams),
+			"post": op([]string{"Config"}, "Create or update model profile", "Creates a new profile version when hash-affecting fields change.", jsonBody("Model profile", modelProfileSchema()), modelProfilePostParams),
+		},
+		"/model-profiles/{id}": map[string]any{
+			"delete": op([]string{"Config"}, "Delete model profile", "Deletes a model profile from the selected backend or virtual indexer.", nil, append([]any{pathID()}, selectorParams...)),
 		},
 		"/policies": map[string]any{
 			"get":  op([]string{"Policies"}, "List policy rules", "Lists admission policy rules.", nil, selectorParams),
@@ -139,7 +145,7 @@ func spec(title string, gateway bool) map[string]any {
 			map[string]any{"name": "System"},
 		},
 		"paths":      paths,
-		"components": components(),
+		"components": components(gateway),
 	}
 }
 
@@ -414,31 +420,41 @@ func ref(path string) map[string]any {
 	return map[string]any{"$ref": path}
 }
 
-func components() map[string]any {
-	return map[string]any{
-		"parameters": map[string]any{
-			"Cluster": map[string]any{
-				"name":        "cluster",
-				"in":          "query",
-				"required":    false,
-				"description": "Gateway selector. Use a concrete cluster for writes, admission, queries, and SSE; omit or use all for fan-out GET endpoints.",
-				"schema":      map[string]any{"type": "string"},
-			},
-			"Backend": map[string]any{
-				"name":        "backend",
-				"in":          "query",
-				"required":    false,
-				"description": "Gateway selector for one exact backend id.",
-				"schema":      map[string]any{"type": "string"},
-			},
-			"Limit": map[string]any{
-				"name":        "limit",
-				"in":          "query",
-				"required":    false,
-				"description": "Maximum number of items to return.",
-				"schema":      map[string]any{"type": "integer", "minimum": 1, "default": 100},
-			},
+func components(gateway bool) map[string]any {
+	parameters := map[string]any{
+		"Cluster": map[string]any{
+			"name":        "cluster",
+			"in":          "query",
+			"required":    false,
+			"description": "Gateway selector. Use a concrete cluster for writes, admission, queries, and SSE; omit or use all for fan-out GET endpoints.",
+			"schema":      map[string]any{"type": "string"},
 		},
+		"Backend": map[string]any{
+			"name":        "backend",
+			"in":          "query",
+			"required":    false,
+			"description": "Gateway selector for one exact backend id.",
+			"schema":      map[string]any{"type": "string"},
+		},
+		"Limit": map[string]any{
+			"name":        "limit",
+			"in":          "query",
+			"required":    false,
+			"description": "Maximum number of items to return.",
+			"schema":      map[string]any{"type": "integer", "minimum": 1, "default": 100},
+		},
+	}
+	if gateway {
+		parameters["SourceBackend"] = map[string]any{
+			"name":        "source_backend",
+			"in":          "query",
+			"required":    false,
+			"description": "Gateway-only source backend id used when moving a local-tokenizer model profile so tokenizer assets can be copied into the target cluster namespace.",
+			"schema":      map[string]any{"type": "string"},
+		}
+	}
+	return map[string]any{
+		"parameters": parameters,
 		"responses": map[string]any{
 			"Error": map[string]any{
 				"description": "Error response",

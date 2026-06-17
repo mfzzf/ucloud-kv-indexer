@@ -88,6 +88,24 @@ func TestModelProfileVersionBump(t *testing.T) {
 	}
 }
 
+func TestRemoveModelProfile(t *testing.T) {
+	s := NewStore("", nil)
+	s.UpsertModelProfile(ModelProfile{ModelID: "qwen", HashProfile: "vllm-v1-text", BlockSize: 16})
+	if !s.RemoveModelProfile("qwen") {
+		t.Fatal("expected existing model profile to be removed")
+	}
+	if s.RemoveModelProfile("qwen") {
+		t.Fatal("expected missing model profile remove to return false")
+	}
+	if ps := s.ListModelProfiles(); len(ps) != 0 {
+		t.Fatalf("model profile not removed: %+v", ps)
+	}
+	audit := s.Audit()
+	if got := audit[len(audit)-1]; got.Action != "remove" || got.Entity != "model_profile" || got.EntityID != "qwen" {
+		t.Fatalf("remove audit missing: %+v", got)
+	}
+}
+
 func TestSnapshotRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/cfg.json"

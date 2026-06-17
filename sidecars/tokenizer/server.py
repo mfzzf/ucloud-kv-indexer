@@ -46,6 +46,7 @@ if TOKENIZER_MODE == "fastokens":
     fastokens.patch_transformers()
 
 from transformers import AutoTokenizer  # noqa: E402
+import transformers  # noqa: E402
 
 
 log = logging.getLogger("local-tokenizer")
@@ -70,6 +71,55 @@ def _normalize_tools(raw: list[dict[str, Any]] | None) -> list[dict[str, Any]] |
     if raw is None:
         return None
     return [_ToolParam.model_validate(item).model_dump(exclude_none=False) for item in raw]
+
+
+def _parse_tool_call_arguments(tool_call: Any) -> Any:
+    if not isinstance(tool_call, dict):
+        return tool_call
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        return tool_call
+    arguments = function.get("arguments")
+    if not isinstance(arguments, str):
+        return tool_call
+    try:
+        parsed = json.loads(arguments) if arguments.strip() else {}
+    except json.JSONDecodeError:
+        return tool_call
+    return {**tool_call, "function": {**function, "arguments": parsed}}
+
+
+def _flatten_tool_content(content: Any) -> Any:
+    if not isinstance(content, list):
+        return content
+    if all(
+        (isinstance(p, dict) and p.get("type") == "text") or isinstance(p, str)
+        for p in content
+    ):
+        return " ".join(p.get("text", "") if isinstance(p, dict) else p for p in content)
+    return content
+
+
+def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert OpenAI wire-format quirks into the shapes chat templates expect.
+
+    OpenAI clients send assistant tool_calls with `function.arguments` as a
+    JSON string, but tool-use chat templates iterate it as a dict
+    (e.g. `arguments.items()`). Tool-role content may also arrive as a list of
+    text parts where templates expect a plain string.
+    """
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        msg = dict(message)
+        role = msg.get("role")
+        if role == "tool":
+            msg["content"] = _flatten_tool_content(msg.get("content"))
+        elif role == "assistant" and isinstance(msg.get("tool_calls"), list):
+            msg["tool_calls"] = [_parse_tool_call_arguments(tc) for tc in msg["tool_calls"]]
+            if msg.get("content") is None:
+                msg["content"] = ""
+        out.append(msg)
+    return out
 
 
 class TokenizeReq(BaseModel):
@@ -98,6 +148,94 @@ TOKENIZERS: dict[str, Any] = {}
 MODEL_DIRS: dict[str, str] = {}
 MODEL_TEMPLATE_HASHES: dict[str, str] = {}
 TOKENIZER_ROOT = Path(os.environ.get("TOKENIZER_ROOT", "/data/tokenizers"))
+
+
+def _read_tokenizer_config(mdir: Path) -> dict[str, Any]:
+    path = mdir / "tokenizer_config.json"
+    if not path.exists():
+        return {}
+
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid tokenizer_config.json: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="invalid tokenizer_config.json: expected object")
+    return parsed
+
+
+def _preview_bytes(path: Path, limit: int = 96) -> str:
+    raw = path.read_bytes()[:limit]
+    text = raw.decode("utf-8", errors="replace")
+    return " ".join(text.split())
+
+
+def _validate_tokenizer_files(mdir: Path, cfg: dict[str, Any]) -> None:
+    if cfg.get("tokenizer_class") != "TokenizersBackend":
+        return
+
+    path = mdir / "tokenizer.json"
+    if not path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail="tokenizer.json required for TokenizersBackend but was not found",
+        )
+
+    size = path.stat().st_size
+    if size == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="invalid tokenizer.json: file is empty",
+        )
+
+    preview = _preview_bytes(path)
+    if preview.lower().startswith(("<!doctype html", "<html")):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "invalid tokenizer.json: file contains HTML, not JSON; "
+                f"size={size}; starts_with={preview!r}"
+            ),
+        )
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            parsed = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid tokenizer.json: {exc}; size={size}; starts_with={preview!r}",
+        ) from exc
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid tokenizer.json: expected object; size={size}; starts_with={preview!r}",
+        )
+
+
+def _load_failure_detail(exc: Exception, cfg: dict[str, Any]) -> str:
+    tokenizer_class = cfg.get("tokenizer_class")
+    auto_map = cfg.get("auto_map")
+    detail = (
+        f"load tokenizer failed: {exc}; "
+        f"transformers={transformers.__version__}; "
+        f"tokenizer_class={tokenizer_class!r}; auto_map={auto_map!r}"
+    )
+    if tokenizer_class == "TokenizersBackend":
+        detail += (
+            "; GLM-5.1 uses transformers' TokenizersBackend. "
+            "Rebuild the tokenizer sidecar with transformers>=5.11,<6 and upload "
+            "tokenizer.json plus tokenizer_config.json from the model repository."
+        )
+    elif tokenizer_class and not auto_map:
+        detail += (
+            "; tokenizer_config.json names a custom tokenizer class without auto_map. "
+            "Upload the complete tokenizer repository files or use a transformers build "
+            "that provides this class."
+        )
+    return detail
 
 
 @app.get("/healthz")
@@ -140,6 +278,7 @@ def tokenize(req: TokenizeReq) -> TokenizeResp:
         raise HTTPException(status_code=404, detail=f"unknown model: {req.model}")
 
     if req.messages is not None:
+        messages = _normalize_messages(req.messages)
         kw: dict[str, Any] = {
             "add_generation_prompt": bool(req.add_generation_prompt),
             "tokenize": True,
@@ -149,12 +288,12 @@ def tokenize(req: TokenizeReq) -> TokenizeResp:
         if req.enable_thinking is not None:
             kw["enable_thinking"] = req.enable_thinking
         try:
-            ids = tk.apply_chat_template(req.messages, **kw)
+            ids = tk.apply_chat_template(messages, **kw)
         except TypeError:
             # Older transformers may not accept tools/enable_thinking.
             kw.pop("tools", None)
             kw.pop("enable_thinking", None)
-            ids = tk.apply_chat_template(req.messages, **kw)
+            ids = tk.apply_chat_template(messages, **kw)
         if isinstance(ids, dict) or (hasattr(ids, "get") and "input_ids" in ids):
             ids = ids["input_ids"]
         if ids and isinstance(ids[0], list):
@@ -241,12 +380,14 @@ def _register_model(payload: dict[str, Any]) -> ModelResp:
         )
 
     log.info("loading tokenizer model_id=%s dir=%s", model_id, mdir)
+    cfg = _read_tokenizer_config(mdir)
+    _validate_tokenizer_files(mdir, cfg)
     try:
         tokenizer = AutoTokenizer.from_pretrained(str(mdir), trust_remote_code=True)
         if chat_template:
             tokenizer.chat_template = str(chat_template)
     except Exception as exc:  # noqa: BLE001 - surface transformer errors as HTTP.
-        raise HTTPException(status_code=400, detail=f"load tokenizer failed: {exc}") from exc
+        raise HTTPException(status_code=400, detail=_load_failure_detail(exc, cfg)) from exc
 
     TOKENIZERS[model_id] = tokenizer
     MODEL_DIRS[model_id] = str(mdir)

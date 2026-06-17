@@ -50,6 +50,20 @@ class StorageTest(unittest.TestCase):
             self.assertEqual(config["chat_template"], template)
             self.assertEqual(config["model_max_length"], 128)
 
+    def test_write_chat_template_tolerates_empty_or_invalid_config(self) -> None:
+        template = "{{ messages }}"
+        for existing in ("", "not-json", "[]"):
+            with self.subTest(existing=existing):
+                with TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root / "tokenizer_config.json").write_text(existing, encoding="utf-8")
+                    digest = write_chat_template(root, template)
+                    self.assertEqual(digest, sha256_text(template))
+                    config = json.loads(
+                        (root / "tokenizer_config.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(config, {"chat_template": template})
+
 
 if __name__ == "__main__":
     unittest.main()

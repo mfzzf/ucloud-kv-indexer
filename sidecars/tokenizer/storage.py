@@ -67,7 +67,14 @@ def write_chat_template(tokenizer_dir: Path, chat_template: str | None) -> str:
     config_path = tokenizer_dir / "tokenizer_config.json"
     data: dict[str, object] = {}
     if config_path.exists():
-        data = json.loads(config_path.read_text(encoding="utf-8"))
+        raw = config_path.read_text(encoding="utf-8").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                data = parsed
     data["chat_template"] = chat_template
     config_path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",

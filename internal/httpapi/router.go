@@ -47,6 +47,7 @@ func (s *Service) ginRouter() *gin.Engine {
 	// Model profiles.
 	r.GET("/model-profiles", httpHandler(s.handleListModelProfiles))
 	r.POST("/model-profiles", httpHandler(s.handleCreateModelProfile))
+	r.DELETE("/model-profiles/*id", httpHandler(s.handleDeleteModelProfile, "id"))
 
 	// Policies.
 	r.GET("/policies", httpHandler(s.handleListPolicies))
@@ -73,7 +74,7 @@ func (s *Service) ginRouter() *gin.Engine {
 func httpHandler(h http.HandlerFunc, pathParams ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		for _, name := range pathParams {
-			c.Request.SetPathValue(name, c.Param(name))
+			c.Request.SetPathValue(name, strings.TrimPrefix(c.Param(name), "/"))
 		}
 		h(c.Writer, c.Request)
 	}

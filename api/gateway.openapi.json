@@ -29,6 +29,15 @@
           "minimum": 1,
           "type": "integer"
         }
+      },
+      "SourceBackend": {
+        "description": "Gateway-only source backend id used when moving a local-tokenizer model profile so tokenizer assets can be copied into the target cluster namespace.",
+        "in": "query",
+        "name": "source_backend",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
       }
     },
     "responses": {
@@ -1209,6 +1218,9 @@
           },
           {
             "$ref": "#/components/parameters/Backend"
+          },
+          {
+            "$ref": "#/components/parameters/SourceBackend"
           }
         ],
         "requestBody": {
@@ -1312,6 +1324,54 @@
           }
         },
         "summary": "Create or update model profile",
+        "tags": [
+          "Config"
+        ]
+      }
+    },
+    "/model-profiles/{id}": {
+      "delete": {
+        "description": "Deletes a model profile from the selected backend or virtual indexer.",
+        "parameters": [
+          {
+            "description": "Resource identifier.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cluster"
+          },
+          {
+            "$ref": "#/components/parameters/Backend"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete model profile",
         "tags": [
           "Config"
         ]

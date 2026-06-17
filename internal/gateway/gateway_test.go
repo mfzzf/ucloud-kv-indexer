@@ -337,14 +337,14 @@ func TestVirtualConnectionHealthAndModelProfiles(t *testing.T) {
 
 	_, err := store.PutTokenizerAsset(t.Context(), TokenizerAssetInput{
 		Cluster:      "local-tokenizer",
-		ModelID:      "local-model",
+		ModelID:      "/mnt/local-model",
 		TokenizerZip: []byte("zip-bytes"),
 	})
 	if err != nil {
 		t.Fatalf("put tokenizer asset: %v", err)
 	}
 	code, body = doJSON(t, h, http.MethodPost, "/model-profiles?backend=virt-0", `{
-		"model_id":"local-model",
+		"model_id":"/mnt/local-model",
 		"framework":"sglang",
 		"tokenizer_mode":"local",
 		"hash_profile":"sglang-v1-text",
@@ -366,9 +366,24 @@ func TestVirtualConnectionHealthAndModelProfiles(t *testing.T) {
 	if len(profiles) != 1 {
 		t.Fatalf("profiles=%d want 1 body %s", len(profiles), body)
 	}
-	if profiles[0]["model_id"] != "local-model" || profiles[0]["_cluster"] != "local-tokenizer" ||
+	if profiles[0]["model_id"] != "/mnt/local-model" || profiles[0]["_cluster"] != "local-tokenizer" ||
 		profiles[0]["_backend"] != "virt-0" || profiles[0]["_virtual"] != true {
 		t.Fatalf("virtual profile missing tags: %+v", profiles[0])
+	}
+
+	code, body = doJSON(t, h, http.MethodDelete, "/model-profiles/%2Fmnt%2Flocal-model?backend=virt-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("delete virtual profile status %d body %s", code, body)
+	}
+	code, body = doJSON(t, h, http.MethodGet, "/model-profiles?backend=virt-0", "")
+	if code != http.StatusOK {
+		t.Fatalf("list virtual profiles after delete status %d body %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &profiles); err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 0 {
+		t.Fatalf("virtual profile delete left rows: %+v", profiles)
 	}
 }
 
